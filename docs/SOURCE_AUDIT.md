@@ -6,8 +6,8 @@ Kiểm tra trực tiếp trang nguồn ngày **26/10/2026**. Bảng này đánh 
 
 | Nguồn | Đã kiểm chứng | Cách dùng |
 | --- | --- | --- |
-| [Mã TechGAR trong workspace](../../TechGAR_Parking/TechGAR_Parking/backend/main_detect/README.md) | Có `src/techgar/motion_tracker.py` với `MotionVehicleTracker.process_frame(frame, timestamp_s)` trả `(tracks, mask, expired_tracks)` và `active_tracks`; `TrackedVehicle` có ID, bbox, `cx/cy`, history. Bản hiện tại không còn `single_camera.py` và `direction_detector.py`. | Đã viết entrypoint một camera và thử 4 giây đầu `vd1.mp4`; baseline bỏ sót nhiều xe trên khung mẫu. Xem [báo cáo P0](P0_VD1_REPORT.md). |
-| [Ultralytics Track](https://docs.ultralytics.com/modes/track/) | Tài liệu chính thức mô tả tracking có ID và chọn tracker như ByteTrack. [Giấy phép Ultralytics](https://docs.ultralytics.com/help/contributing/) có điều kiện AGPL hoặc Enterprise. | Dùng làm phương án đối chứng YOLO/tracking khi đã có clip; không tải model/nhúng thư viện vào mặc định trước khi đo. |
+| Mã TechGAR trong workspace riêng của tác giả (không có khi clone repo này) | Có `src/techgar/motion_tracker.py` với `MotionVehicleTracker.process_frame(frame, timestamp_s)` trả `(tracks, mask, expired_tracks)` và `active_tracks`; `TrackedVehicle` có ID, bbox, `cx/cy`, history. | Đã viết adapter một camera và thử 4 giây đầu `vd1.mp4`; baseline bỏ sót nhiều xe trên khung mẫu. Xem [báo cáo P0](P0_VD1_REPORT.md). |
+| [Ultralytics Track](https://docs.ultralytics.com/modes/track/) | Tài liệu chính thức mô tả tracking có ID và chọn tracker như ByteTrack. [Giấy phép Ultralytics](https://docs.ultralytics.com/help/contributing/) có điều kiện AGPL hoặc Enterprise. | YOLO hiện là hai lựa chọn 1 và 3 trong `menu.py`; vẫn cần đo trên video có nhãn trước khi kết luận chất lượng tracking. |
 | [Roboflow Supervision LineZone](https://supervision.roboflow.com/latest/detection/tools/line_zone/) và [PolygonZone](https://supervision.roboflow.com/latest/detection/tools/polygon_zone/) | Tài liệu chính thức có công cụ vùng/đếm đường, `LineZone` cần `tracker_id`; [Supervision](https://supervision.roboflow.com/latest/) ghi giấy phép MIT. | Tham khảo cách định nghĩa vùng/vạch; công cụ đếm qua vạch **không tự kết luận** vượt đèn đỏ hay lấn làn. Cài khi có nhu cầu thực sự. |
 | [Open GoPro](https://gopro.github.io/OpenGoPro/) | Tài liệu GoPro có bảng camera/firmware hỗ trợ và chức năng stream qua Wi-Fi/USB cho mẫu tương thích. | Chỉ dùng sau khi biết model/firmware GoPro của nhóm. P0 vẫn dùng MP4. |
 | [MQTT specification](https://mqtt.org/mqtt-specification/), [Mosquitto](https://mosquitto.org/documentation/) và [Paho Python](https://eclipse.dev/paho/files/paho.mqtt.python/html/) | Nguồn chính thức cho protocol, broker và Python client. Trang Paho được kiểm tra có ghi lưu ý về phiên bản API/callback, nên phải xem docs đúng phiên bản khi triển khai. | Dùng ở P2 để thực hiện luồng IoT và thử gửi lặp/mất kết nối; MQTT vẫn là đề xuất, chưa được giảng viên xác nhận là bắt buộc. |
@@ -37,7 +37,7 @@ Kiểm tra trực tiếp trang nguồn ngày **26/10/2026**. Bảng này đánh 
 
 Bản PDF được giữ cục bộ và bị `.gitignore` loại khỏi repo; người clone có thể tải từ liên kết nguồn ở dưới.
 
-- Đường dẫn: [`references/papers/Vo_Nguyen_Tran_2026_Vietnamese_CCTV_dataset.pdf`](../references/papers/Vo_Nguyen_Tran_2026_Vietnamese_CCTV_dataset.pdf)
+- Đường dẫn cục bộ trên máy tác giả: `references/papers/Vo_Nguyen_Tran_2026_Vietnamese_CCTV_dataset.pdf` (không có khi clone).
 - Trang nguồn: <https://www.techscience.com/cmc/v88n1/67301/html>
 - PDF nguồn: <https://cdn.techscience.press/files/cmc/2026/TSP_CMC-88-1/TSP_CMC_78756/TSP_CMC_78756.pdf>
 - Kiểm tra: PDF mở được, **19 trang**, **28.777.140 byte**, SHA-256 `d702118b357272b71f1087f043b2ddd0d794166c08b3d51fa37719440b7d7759`.
@@ -45,4 +45,4 @@ Bản PDF được giữ cục bộ và bị `.gitignore` loại khỏi repo; ng
 
 ## Kết luận chọn nguồn
 
-`vd1.mp4` đã có và được chạy thử, nhưng còn thiếu nguồn gốc/quyền sử dụng, ROI và nhãn để chấm chất lượng. Repo bên ngoài và dataset lớn chưa được tải vào mã dự án vì chưa có tiêu chí đo cho thấy chúng cần thiết. Tài liệu PDF Đà Nẵng là bản tải tham khảo duy nhất, có xuất xứ và checksum rõ ràng.
+`vd1.mp4` đã có URL nguồn và được chạy thử, nhưng quyền tái phân phối vẫn chưa được xác minh; còn thiếu ROI và nhãn để chấm chất lượng. Repo bên ngoài và dataset lớn chưa được tải vào mã dự án vì chưa có tiêu chí đo cho thấy chúng cần thiết. Tài liệu PDF Đà Nẵng là bản tải tham khảo duy nhất, có xuất xứ và checksum rõ ràng.

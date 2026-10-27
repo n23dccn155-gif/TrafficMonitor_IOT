@@ -28,10 +28,10 @@ Quan sát video debug: MOG2 có vài box đúng trên xe máy nhưng bỏ sót p
 
 ## Xem debug
 
-- [Video 1× so sánh hình gốc và box/ID](../outputs/vd2_1x_yolo_probe_300/compare_raw_vs_debug.mp4) — 300 frame đầu, thời lượng 20 giây. [Video chỉ có box/ID](../outputs/vd2_1x_yolo_probe_300/annotated.mp4) và [JSONL](../outputs/vd2_1x_yolo_probe_300/tracks.jsonl) ở cùng thư mục.
-- [Video so sánh gốc bên trái và kết quả YOLO bên phải](../outputs/vd2_live_debug/compare_raw_vs_debug.mp4) — 300 frame đầu (10 giây), được tạo để xem lại. Nếu trình đọc Markdown không phát video, mở file trong Explorer hoặc player.
-- [Video YOLO có box/ID/quỹ đạo](../outputs/vd2_live_debug/annotated.mp4), [video MOG2](../outputs/vd2_motion_probe/annotated.mp4).
-- JSONL và summary nằm cùng thư mục output; `outputs/` không được đưa vào Git.
+- Bản phát 1×: `outputs/vd2_1x_yolo_probe_300/compare_raw_vs_debug.mp4` — 300 frame đầu, thời lượng 20 giây; `annotated.mp4` và `tracks.jsonl` nằm cùng thư mục.
+- Bản quay gốc: `outputs/vd2_live_debug/compare_raw_vs_debug.mp4` — 300 frame đầu (10 giây), gốc bên trái và kết quả YOLO bên phải.
+- Video YOLO có box/ID/quỹ đạo: `outputs/vd2_live_debug/annotated.mp4`; video MOG2: `outputs/vd2_motion_probe/annotated.mp4`.
+- JSONL và summary nằm cùng thư mục output. Các file `outputs/` chỉ có trên máy đã chạy thử, không được đưa vào Git; xem [danh mục file cục bộ](LOCAL_ARTIFACTS.md).
 - [Lệnh chạy cửa sổ debug trực tiếp](DEBUG_VIEWING.md): `--show`, **Space**, **N**, **Q**; MOG2 còn có `--show-mask`.
 
 ## Kiểm tra bản phát 1× (27/10/2026)

@@ -6,23 +6,23 @@ Chạy `menu.py` từ terminal IDE để chọn video và thuật toán. Cửa s
 
 Hai chương trình P0 vẫn có tùy chọn `--show` để mở cùng cửa sổ. `annotated.mp4` chỉ được tạo khi thêm `--save-video`; `tracks.jsonl` và `summary.json` luôn được lưu. Cửa sổ do công cụ Codex khởi chạy có thể nằm trong phiên desktop cách ly, nên **không hiện trên màn hình của bạn**. Muốn nhìn thấy cửa sổ OpenCV, chạy trong terminal IDE của bạn.
 
-Từ thư mục môn học `IOT`, mở cửa sổ debug cho **toàn bộ `vd2` bản phát 1×**:
+Từ thư mục `TrafficMonitor_IoT`, mở cửa sổ debug cho **toàn bộ `vd2` bản phát 1×** (file dẫn xuất này không có sẵn sau khi clone):
 
 ```powershell
-& '.\IOT_CAM\TrafficMonitor_IoT\run_vd2_debug.cmd'
+.\.venv\Scripts\python.exe src\traffic_monitor\yolo_camera.py --source data\derived\vd2_playback_1x_from_2x.mp4 --output outputs\vd2_1x_live_debug --width 960 --show --save-video
 ```
 
-Muốn chỉ chạy 300 frame đầu, thêm `--max-frames 300`. Launcher gọi YOLOv8n + ByteTrack, mở cửa sổ ngay trong phiên desktop hiện tại và lưu kết quả vào `outputs/vd2_1x_live_debug/`. Bản 1× nằm tại `data/derived/vd2_playback_1x_from_2x.mp4`; nếu chỉ muốn xem video đã xử lý mà chưa tự chạy GUI, mở [video so sánh 20 giây đầu](../outputs/vd2_1x_yolo_probe_300/compare_raw_vs_debug.mp4).
+Muốn chỉ chạy 300 frame đầu, thêm `--max-frames 300`. Script dùng YOLOv8n + ByteTrack và lưu kết quả vào `outputs/vd2_1x_live_debug/`. Bản 1× nằm tại `data/derived/vd2_playback_1x_from_2x.mp4`; trên máy đã chạy thử còn video cũ `outputs/vd2_1x_yolo_probe_300/compare_raw_vs_debug.mp4`.
 
 Để so sánh **thị giác máy tính cổ điển không dùng YOLO** trên `vd2` với ba ô RAW, MOG2 + Kalman và FrameDiff + Kalman:
 
 ```powershell
-& '.\IOT_CAM\TrafficMonitor_IoT\run_classical_vd2.cmd'
+.\.venv\Scripts\python.exe src\traffic_monitor\classical_compare.py --source data\derived\vd2_playback_1x_from_2x.mp4 --output outputs\vd2_classical_live --width 960 --show
 ```
 
-Launcher mặc định chạy 300 frame. Xem [video ba ô đã xuất](../outputs/vd2_classical_compare_300/comparison_h264.mp4) và [giải thích, kết quả](CLASSICAL_COMPARISON.md). Box tím có chữ `P` là vị trí Kalman dự đoán khi frame hiện tại không có blob ghép được.
+Script mặc định chạy 300 frame. Video ba ô từ lần thử cũ nằm tại `outputs/vd2_classical_compare_300/comparison_h264.mp4` trên máy tác giả; xem [giải thích và kết quả](CLASSICAL_COMPARISON.md). Box tím có chữ `P` là vị trí Kalman dự đoán khi frame hiện tại không có blob ghép được.
 
-Với `vd3` quay ở 1×, [video so sánh YOLO và TechGAR đã xuất](../outputs/vd3_comparison_180/comparison_h264.mp4). Muốn chạy lại cả hai và ghép video, dùng `run_vd3_compare.cmd`. Muốn xem **cửa sổ YOLO rồi cửa sổ TechGAR xuất hiện lần lượt**, chạy `run_vd3_live.cmd` từ terminal IDE. Có thể chạy từng chương trình riêng bằng hai lệnh sau:
+Với `vd3` quay ở 1×, máy đã chạy thử có video so sánh YOLO và TechGAR tại `outputs/vd3_comparison_180/comparison_h264.mp4`. Để xem trực tiếp, chạy hai lệnh Python dưới đây lần lượt từ terminal IDE tại thư mục `IOT`. Chỉ chạy lệnh TechGAR nếu bạn có repo TechGAR riêng; để tạo lại video ghép ba ô, xem [báo cáo `vd3`](P0_VD3_REPORT.md).
 
 ```powershell
 & '.\IOT_CAM\TrafficMonitor_IoT\.venv\Scripts\python.exe' '.\IOT_CAM\TrafficMonitor_IoT\src\traffic_monitor\yolo_camera.py' --source '.\IOT_CAM\TrafficMonitor_IoT\data\raw\vd3.mp4' --output '.\IOT_CAM\TrafficMonitor_IoT\outputs\vd3_yolo_live' --width 640 --max-frames 180 --show

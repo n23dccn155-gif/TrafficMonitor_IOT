@@ -4,25 +4,21 @@ Ngày 27/10/2026. Người dùng xác nhận `vd3` được quay ở **tốc đ�
 
 ## Xem kết quả
 
-- [Video H.264 so sánh ba ô](../outputs/vd3_comparison_180/comparison_h264.mp4): hình gốc, YOLOv8n + ByteTrack, TechGAR `MotionVehicleTracker` trên **đúng cùng frame**.
-- [Ảnh frame 120](../outputs/vd3_comparison_180/frame_120.jpg), [video YOLO](../outputs/vd3_yolo_180/annotated.mp4), [video TechGAR](../outputs/vd3_techgar_180/annotated.mp4).
+- Video ba ô cục bộ `outputs/vd3_comparison_180/comparison_h264.mp4`: hình gốc, YOLOv8n + ByteTrack, TechGAR `MotionVehicleTracker` trên **đúng cùng frame**.
+- Ảnh `outputs/vd3_comparison_180/frame_120.jpg`; video YOLO `outputs/vd3_yolo_180/annotated.mp4`; video TechGAR `outputs/vd3_techgar_180/annotated.mp4`. Các file này [không có sau khi clone](LOCAL_ARTIFACTS.md).
 - Mỗi thư mục output có `tracks.jsonl` và `summary.json`. ID do hai tracker cấp độc lập; ID số 5 của bên này không phải ID số 5 của bên kia.
 
-Chạy lại toàn bộ phép thử từ terminal IDE ở thư mục `IOT`:
+Muốn chạy lại phép thử, cần có `data/raw/vd3.mp4` và repo TechGAR riêng (đặt `TECHGAR_ROOT` theo [README](../README.md)). Từ terminal IDE ở thư mục `TrafficMonitor_IoT`, chạy lần lượt:
 
 ```powershell
-& '.\IOT_CAM\TrafficMonitor_IoT\run_vd3_compare.cmd'
+.\.venv\Scripts\python.exe src\traffic_monitor\yolo_camera.py --source data\raw\vd3.mp4 --output outputs\vd3_yolo_180 --width 640 --max-frames 180 --save-video
+.\.venv\Scripts\python.exe src\traffic_monitor\single_camera.py --source data\raw\vd3.mp4 --output outputs\vd3_techgar_180 --width 640 --max-frames 180 --min-area 50 --min-width 6 --min-height 6 --min-displacement 4 --max-distance 70 --save-video
+.\.venv\Scripts\python.exe src\traffic_monitor\compare_yolo_techgar.py --source data\raw\vd3.mp4 --yolo outputs\vd3_yolo_180\annotated.mp4 --techgar outputs\vd3_techgar_180\annotated.mp4 --output outputs\vd3_comparison_180\comparison.mp4 --max-frames 180 --panel-width 640
 ```
 
-Launcher chạy YOLO, TechGAR, ghép video rồi nén H.264. TechGAR mất khoảng 100 giây cho đoạn này trên CPU; kết quả đã xuất sẵn ở liên kết trên. Muốn quan sát trực tiếp cửa sổ khi từng chương trình chạy, thêm `--show` vào lệnh Python tương ứng theo [hướng dẫn debug](DEBUG_VIEWING.md).
+Ba lệnh trên tạo video so sánh `comparison.mp4`; file H.264 nêu ở phần trên là bản chuyển mã từ lần chạy cũ. TechGAR mất khoảng 100 giây cho đoạn này trên CPU của lần thử trước. Muốn quan sát trực tiếp cửa sổ khi từng chương trình chạy, thêm `--show` vào lệnh Python tương ứng theo [hướng dẫn debug](DEBUG_VIEWING.md).
 
-Nếu muốn **hai cửa sổ debug xuất hiện lần lượt trên desktop của bạn** trong lúc xử lý, chạy từ terminal IDE:
-
-```powershell
-& '.\IOT_CAM\TrafficMonitor_IoT\run_vd3_live.cmd'
-```
-
-Lệnh này mở YOLO trước, sau đó TechGAR cùng mặt nạ MOG2; mỗi lượt lưu output riêng. Cửa sổ phải được khởi chạy từ phiên Windows của bạn, vì cửa sổ do công cụ Codex mở có thể nằm trong desktop cách ly.
+Nếu muốn **hai cửa sổ debug xuất hiện lần lượt**, thêm `--show` vào hai lệnh xử lý đầu tiên ở trên; với TechGAR có thể thêm `--show-mask`. Cửa sổ phải được khởi chạy từ phiên Windows của bạn, vì cửa sổ do công cụ Codex mở có thể nằm trong desktop cách ly.
 
 ## Thiết lập so sánh
 

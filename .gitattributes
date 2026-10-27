@@ -1,5 +1,5 @@
+/.gitattributes text eol=lf
 * text=auto
 *.py text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
-*.cmd text eol=crlf

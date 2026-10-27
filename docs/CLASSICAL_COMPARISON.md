@@ -4,17 +4,17 @@ Ngày 27/10/2026. Chạy **300 frame đầu** của [bản `vd2` phát 1×](../d
 
 ## Xem ngay
 
-- [Video so sánh ba ô, H.264](../outputs/vd2_classical_compare_300/comparison_h264.mp4): **RAW** bên trái, **MOG2 + Kalman** ở giữa, **FrameDiff + Kalman** bên phải. Dải đen/trắng dưới mỗi nhánh là mặt nạ chuyển động; pixel trắng là nơi thuật toán thấy thay đổi.
-- [Ảnh frame 100](../outputs/vd2_classical_compare_300/debug_frame_100.jpg): cả hai nhánh có blob. [Ảnh frame 150](../outputs/vd2_classical_compare_300/debug_frame_150.jpg): frame difference không có blob, nên các box tím `P` chỉ là dự đoán Kalman.
-- [Bảng tóm tắt JSON](../outputs/vd2_classical_compare_300/summary.json) và [theo dõi từng frame](../outputs/vd2_classical_compare_300/tracks.jsonl).
+- Video ba ô cục bộ: `outputs/vd2_classical_compare_300/comparison_h264.mp4`; **RAW** bên trái, **MOG2 + Kalman** ở giữa, **FrameDiff + Kalman** bên phải. Dải đen/trắng dưới mỗi nhánh là mặt nạ chuyển động; pixel trắng là nơi thuật toán thấy thay đổi.
+- Ảnh cục bộ `outputs/vd2_classical_compare_300/debug_frame_100.jpg`: cả hai nhánh có blob. Ảnh `debug_frame_150.jpg`: frame difference không có blob, nên các box tím `P` chỉ là dự đoán Kalman.
+- Bảng tóm tắt `outputs/vd2_classical_compare_300/summary.json` và theo dõi từng frame trong `tracks.jsonl` cùng thư mục. Các file này không có sau khi clone; xem [danh mục file cục bộ](LOCAL_ARTIFACTS.md).
 
-Muốn **thấy cửa sổ trong lúc chạy** từ terminal IDE tại thư mục `IOT`:
+Muốn **thấy cửa sổ trong lúc chạy** từ terminal IDE tại thư mục `TrafficMonitor_IoT` (cần có bản `vd2` dẫn xuất):
 
 ```powershell
-& '.\IOT_CAM\TrafficMonitor_IoT\run_classical_vd2.cmd'
+.\.venv\Scripts\python.exe src\traffic_monitor\classical_compare.py --source data\derived\vd2_playback_1x_from_2x.mp4 --output outputs\vd2_classical_live --width 960 --show
 ```
 
-Launcher chạy 300 frame đầu; dùng `--max-frames 2737` nếu muốn chạy cả file. **Space** tạm dừng, **N** đi một frame khi tạm dừng, **Q/Esc** dừng. Cửa sổ do công cụ Codex mở có thể nằm trong phiên desktop cách ly; chạy launcher từ terminal của bạn để nhìn thấy cửa sổ.
+Script chạy 300 frame đầu; dùng `--max-frames 2737` nếu muốn chạy cả file. **Space** tạm dừng, **N** đi một frame khi tạm dừng, **Q/Esc** dừng. Cửa sổ do công cụ Codex mở có thể nằm trong phiên desktop cách ly; chạy từ terminal của bạn để nhìn thấy cửa sổ.
 
 ## Cách chạy
 
