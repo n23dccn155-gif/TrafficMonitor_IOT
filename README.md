@@ -1,25 +1,31 @@
-# TrafficMonitor IoT
+# TrafficMonitor IoT — theo dõi phương tiện từ video
 
-Đồ án môn IoT: xem video giao thông bằng camera cố định, vẽ box, loại phương tiện và ID theo dõi. **Hiện tại đây là prototype tracking**, chưa phát hiện hay kết luận vi phạm giao thông. ID có thể đổi khi xe bị che hoặc detector bỏ sót.
+Đồ án môn IoT dùng camera cố định để phát hiện phương tiện, vẽ box và gán ID theo thời gian. **Phiên bản hiện tại chỉ thử nghiệm tracking**: chưa phát hiện đi ngược chiều, sai làn hay vượt đèn đỏ, và không dùng để kết luận vi phạm. ID có thể đổi khi xe bị che hoặc detector bỏ sót.
 
-## Cài và chạy trên Windows sau khi clone
+## Bắt đầu trên Windows
 
-Máy cần Python **3.12 64-bit**, Git và Internet cho lần cài thư viện/tải model đầu tiên. Các lệnh sau chạy trong PowerShell, từ **thư mục `TrafficMonitor_IoT`**:
+Khuyến nghị Python **3.12 64-bit** và cần Internet cho lần cài thư viện/tải model đầu tiên. Mở PowerShell rồi chạy:
 
 ```powershell
+git clone https://github.com/n23dccn155-gif/TrafficMonitor_IOT.git
+cd TrafficMonitor_IOT
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe menu.py
 ```
 
-Nếu Python đã là 3.12 nhưng `py -3.12` không có, thay bằng `python -m venv .venv`. Không cần kích hoạt môi trường ảo. Mặc định pip có thể cài PyTorch CPU; muốn dùng NVIDIA GPU, cài bản PyTorch CUDA theo [trang cài đặt chính thức](https://docs.pytorch.org/get-started/locally/) trước khi cài `requirements.txt`. Hai pipeline YOLO tự dùng CUDA khi `torch.cuda.is_available()` là `True`.
+Nếu Python đã là 3.12 nhưng lệnh `py -3.12` không có, dùng `python -m venv .venv`. Không cần kích hoạt môi trường ảo. Để cập nhật mã về sau, chạy `git pull` **trong thư mục vừa clone**. Không chép `.venv` từ máy khác sang.
 
-Lần đầu chọn thuật toán 1 hoặc 3, chương trình tải checkpoint chính thức vào `weights/`; các lần sau dùng lại bản đã tải. Nếu máy offline, lấy `yolo11s.pt` hoặc `yolov8n.pt` từ [Ultralytics assets](https://github.com/ultralytics/assets/releases) và đặt đúng tên trong `weights/`.
+Mặc định pip có thể cài PyTorch CPU. Nếu có NVIDIA GPU và muốn dùng CUDA, cài PyTorch theo [hướng dẫn chính thức](https://docs.pytorch.org/get-started/locally/) **trước** lệnh cài `requirements.txt`; hai pipeline YOLO tự dùng CUDA khi `torch.cuda.is_available()` trả `True`. Lần đầu chọn thuật toán 1 hoặc 3, chương trình tải checkpoint chính thức vào `weights/`; các lần sau dùng lại bản đã tải. Nếu máy offline, lấy `yolo11s.pt` hoặc `yolov8n.pt` từ [Ultralytics assets](https://github.com/ultralytics/assets/releases) và đặt đúng tên trong `weights/`.
 
-**Video không nằm trong Git.** Dán đường dẫn tới MP4 của bạn ở menu, hoặc chép `vd1.mp4`, `vd2.mp4`, `vd3.mp4` vào `data/raw/` để dùng phím tắt 1/2/3. Nếu chưa có video, mục chọn nhanh sẽ báo thiếu file và cho nhập lại. Video gốc của nhóm và bản PDF tham khảo được loại khỏi commit vì dung lượng và quyền chia sẻ chưa được xác minh.
+### Chuẩn bị video và xem debug
 
-Trong menu, chọn nguồn file → thuật toán → chất lượng 640/960/1280 px → có lưu MP4 hay không. File được đọc tuần tự, không bỏ frame. Cửa sổ có ảnh gốc bên trái, kết quả bên phải; **Space** tạm dừng, **N** đi một frame, **S** chụp ảnh, **Q/Esc** về menu. Mỗi lượt lưu `tracks.jsonl` và `summary.json` dưới `outputs/runs/`; MP4 chỉ được tạo nếu bạn chọn lưu. Chạy từ terminal desktop để cửa sổ OpenCV hiện trên màn hình của bạn.
+**Repo không chứa video.** Khi menu hỏi nguồn, chọn file rồi dán đường dẫn MP4 trên máy của bạn, kể cả đường dẫn có dấu cách. Các phím tắt `1`, `2`, `3` trong bước chọn file chỉ hoạt động nếu bạn tự đặt `vd3.mp4`, `vd2.mp4`, `vd1.mp4` tương ứng trong `data/raw/`; nhấn Enter cũng chọn `vd3.mp4`. Nếu file chưa có, menu báo lỗi và cho nhập lại.
+
+Chọn tiếp thuật toán → độ rộng xử lý 640/960/1280 px → có lưu MP4 debug hay không (mặc định **không**). Với **file video**, cả ba mức chất lượng đều đọc tuần tự mọi frame; cửa sổ có thể cập nhật chậm hơn tốc độ phát gốc nếu CPU không xử lý kịp. Ảnh gốc ở bên trái, box/ID ở bên phải; **Space** tạm dừng/tiếp tục, **N** đi một frame khi đang tạm dừng, **S** lưu ảnh và **Q/Esc** đóng cửa sổ để về menu. Chạy từ terminal desktop của bạn để cửa sổ OpenCV hiện trên màn hình.
+
+Mỗi lượt tạo thư mục riêng dưới `outputs/runs/` với `tracks.jsonl` (box, ID và timestamp theo frame), `summary.json` (số frame và FPS xử lý), ảnh chụp nếu nhấn **S**, và `annotated.mp4` nếu đã chọn lưu. `outputs/`, video, model weights và `.venv/` đều bị Git bỏ qua; bạn của bạn sẽ tự tạo output trên máy họ.
 
 ## Chọn thuật toán
 
@@ -40,7 +46,7 @@ $env:TECHGAR_ROOT = 'D:\duong-dan\TechGAR_Parking\TechGAR_Parking\backend\main_d
 .\.venv\Scripts\python.exe menu.py
 ```
 
-Không có repo TechGAR, lựa chọn 1 và 3 vẫn hoạt động; menu sẽ báo rõ khi chọn 2. Không cần cài Django để chạy vòng lặp camera. DroidCam hiện là nhánh thử nghiệm, chưa có bộ đệm frame mới nhất và cơ chế nối lại đáng tin cậy; dùng file MP4 để so sánh các thuật toán.
+Không có repo TechGAR, lựa chọn 1 và 3 vẫn hoạt động; menu sẽ báo rõ khi chọn 2. Không cần cài Django để chạy vòng lặp camera. **DroidCam còn thử nghiệm**: chưa có bộ đệm chỉ giữ frame mới nhất, thống kê frame bị bỏ hay cơ chế nối lại đáng tin cậy; hãy dùng file MP4 để so sánh thuật toán.
 
 ## Cấu trúc bản chia sẻ
 
@@ -49,7 +55,7 @@ Không có repo TechGAR, lựa chọn 1 và 3 vẫn hoạt động; menu sẽ b�
 - `requirements.txt`: thư viện cài qua pip; `.venv/` không đưa lên Git.
 - `weights/`, `data/raw/`, `outputs/`: cache model, video riêng và kết quả chạy; không đưa lên Git.
 - `docs/`: kế hoạch, báo cáo thử nghiệm và [danh mục nguồn](docs/SOURCE_AUDIT.md). Các liên kết tới output/video trong báo cáo lịch sử chỉ tồn tại trên máy đã chạy thử.
-- `run_*.cmd`: launcher tái lập thí nghiệm cũ, cần clip cục bộ và đôi khi cần TechGAR; không phải điểm vào chính.
+- `run_*.cmd`: launcher tái lập thí nghiệm cũ, cần clip cục bộ và đôi khi cần TechGAR; người mới chỉ cần chạy `menu.py`.
 
 ## Giấy phép và dữ liệu
 
