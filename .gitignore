@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.env
+data/raw/*
+!data/raw/.gitkeep
+data/derived/*
+!data/derived/.gitkeep
+outputs/*
+!outputs/.gitkeep
+*.pt
+*.onnx
+weights/*
+!weights/.gitkeep
+references/papers/*.pdf
+*.log

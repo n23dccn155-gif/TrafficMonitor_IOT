@@ -1,0 +1,5 @@
+# Tested baseline versions. Install PyTorch for your CPU/CUDA first if needed.
+ultralytics==8.4.190
+supervision==0.26.0
+lapx==0.9.4
+imageio-ffmpeg==0.6.0
