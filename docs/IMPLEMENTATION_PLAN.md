@@ -1,13 +1,13 @@
 # Kế hoạch triển khai và cổng kiểm chứng
 
-**Tiến độ hiện tại:** đã chạy mẫu `vd1.mp4` với TechGAR và YOLO/ByteTrack; bản YOLO đã xuất toàn clip. Chưa có nhãn quỹ đạo, ROI hoặc đánh giá hành vi. Xem [báo cáo P0](P0_VD1_REPORT.md).
+**Tiến độ hiện tại:** `menu.py` có ba lựa chọn chạy từ repo này: YOLO11s chia ô, MOG2 + Kalman độc lập, YOLOv8n + ByteTrack. TechGAR chỉ còn trong phép thử lịch sử và không cần cho menu. Đã chạy mẫu `vd1.mp4` với TechGAR cũ và YOLO/ByteTrack; bản YOLO đã xuất toàn clip. Chưa có nhãn quỹ đạo, ROI hoặc đánh giá hành vi. Xem [báo cáo P0](P0_VD1_REPORT.md).
 
 ## Kiến trúc dự kiến
 
 ```text
 GoPro cố định / MP4
   → video input
-  → detector + tracker (TechGAR baseline; YOLO đối chứng)
+  → detector + tracker (MOG2 + Kalman và hai nhánh YOLO trong menu)
   → TrackObservation {camera, timestamp, ID, bbox, ground_point, trajectory, quality}
   → hình học ROI/làn/vạch dừng/hướng
   → Rule Engine + SignalProvider có đồng bộ thời gian
@@ -20,10 +20,10 @@ GoPro cố định / MP4
 ## P0 — video và tracking một camera
 
 1. Chọn clip ban ngày, camera cố định, rõ xe và đường; ghi nguồn và quyền sử dụng. Ưu tiên có xe máy/ô tô, đủ frame liên tiếp, không rung hoặc thay góc.
-2. Viết entrypoint một camera gọi `MotionVehicleTracker.process_frame(frame, timestamp_s)` từ TechGAR. Bản TechGAR hiện tại **không có** `single_camera.py`; không chạy theo lệnh cũ trong bản bàn giao.
+2. Chạy ba nhánh hiện có trong `menu.py` trên cùng đoạn video: MOG2 + Kalman độc lập, YOLO11s chia ô và YOLOv8n + ByteTrack. Adapter TechGAR cũ chỉ để tái lập báo cáo lịch sử, không là phụ thuộc của chương trình chính.
 3. Lấy track đã xác nhận, xuất timestamp, Track ID, bbox, `cx/cy`, lịch sử và chất lượng theo schema thống nhất. Phân biệt quan sát thật với vị trí dự đoán để không đưa dự đoán quá lâu vào rule.
 4. Xuất video box/ID và JSONL, xem bằng mắt ID switch, xe bị bỏ sót, bóng đổ, che khuất và xe đứng yên.
-5. Nếu baseline không đáp ứng, chạy một detector/tracker pretrained độc lập trên **cùng clip** để so sánh. Chưa tích hợp vào sản phẩm trước khi có số liệu.
+5. Gán nhãn một đoạn kiểm tra và so sánh độ liên tục ID, bỏ sót xe, box sai và FPS của ba nhánh trên **cùng clip**. Chưa dùng nhánh nào để kết luận vi phạm trước khi có số liệu.
 6. Cấu hình ROI và hướng hợp lệ, làm `WrongWayDetector` trên nhiều quan sát và có ngưỡng khoảng cách/thời gian, chống báo lặp.
 
 **Xong P0 khi:** có một clip đầu vào có xuất xứ, video đầu ra có box/ID/quỹ đạo, file sự kiện/track đọc được, bảng lỗi tracking, và một vài ca đúng/sai chiều được đánh nhãn thủ công. Nếu clip không có hành vi sai chiều, phải ghi rõ chưa đo được recall sự kiện.

@@ -4,6 +4,8 @@ Các link video trong tài liệu này trỏ tới [output cục bộ, không đ
 
 Chạy `menu.py` từ terminal IDE để chọn video và thuật toán. Cửa sổ có **ảnh gốc bên trái, box/ID bên phải** và dòng FPS nguồn/FPS xử lý phía dưới. Ba preset của menu đều xử lý đủ frame file; preset 640 px chỉ giảm độ phân giải. Mặc định chỉ lưu `tracks.jsonl` và `summary.json`; chọn ghi MP4 khi menu hỏi nếu cần phát lại mượt ở FPS gốc. Xem [giải thích tốc độ](PERFORMANCE.md).
 
+**Lựa chọn 2 hiện nay** dùng MOG2 + Kalman độc lập trong repo và không cần TechGAR. Các lệnh `single_camera.py` ở phần dưới chỉ để tái lập phép thử TechGAR cũ, nên cần repo TechGAR riêng; người mới nên dùng `menu.py`.
+
 Hai chương trình P0 vẫn có tùy chọn `--show` để mở cùng cửa sổ. `annotated.mp4` chỉ được tạo khi thêm `--save-video`; `tracks.jsonl` và `summary.json` luôn được lưu. Cửa sổ do công cụ Codex khởi chạy có thể nằm trong phiên desktop cách ly, nên **không hiện trên màn hình của bạn**. Muốn nhìn thấy cửa sổ OpenCV, chạy trong terminal IDE của bạn.
 
 Từ thư mục `TrafficMonitor_IoT`, mở cửa sổ debug cho **toàn bộ `vd2` bản phát 1×** (file dẫn xuất này không có sẵn sau khi clone):

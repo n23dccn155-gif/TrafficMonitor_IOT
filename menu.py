@@ -3,7 +3,7 @@
 Quy trình chuẩn:
   1. Chọn loại nguồn: [1] Video file cục bộ hoặc [2] Link DroidCam live.
   2. Sau khi chọn nguồn, mới hiển thị phần nhập / dán đường dẫn (hoặc chọn nhanh vd1, vd2, vd3).
-  3. Tiếp theo chọn thuật toán theo dõi (cả 3 thuật toán đều quan sát các loại xe và gán ID liên tục).
+  3. Chọn thuật toán theo dõi; MOG2 chỉ theo dõi vùng chuyển động và không phân loại xe.
   4. Mở cửa sổ trực tiếp OpenCV (gốc bên trái, box/ID bên phải).
 """
 
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -150,8 +149,8 @@ def select_algorithm() -> str | None:
         print("  1. YOLO11s chia 4 ô + ByteTrack (thử nghiệm, ưu tiên xe nhỏ)")
         print("     • Đổi lại: rất nặng CPU; vẫn có thể bỏ sót xe và đổi ID")
         print()
-        print("  2. Thuật toán 2: Tracker TechGAR (MOG2 Motion Blobs)")
-        print("     • Quan sát: vùng chuyển động; không phân loại ô tô/xe máy")
+        print("  2. MOG2 trừ nền + Kalman (có sẵn trong repo)")
+        print("     • Quan sát: vùng chuyển động; gán ID, không phân loại xe")
         print("     • Có thể mất xe dừng, xe bị che và tạo box sai")
         print()
         print("  3. Thuật toán 3: YOLOv8n + ByteTrack (Baseline)")
@@ -216,19 +215,6 @@ def main():
         if algo is None:
             continue
 
-        if algo == "2":
-            if source.startswith(("http://", "https://", "rtsp://")):
-                print("[TechGAR] Adapter hiện chỉ hỗ trợ file video. Hãy chọn thuật toán 1 hoặc 3 cho stream thử nghiệm.")
-                continue
-            techgar_root = Path(os.environ.get(
-                "TECHGAR_ROOT",
-                str(PROJECT_ROOT.parent / "TechGAR_Parking" / "TechGAR_Parking" / "backend" / "main_detect"),
-            )).expanduser()
-            if not (techgar_root / "src" / "techgar" / "motion_tracker.py").is_file():
-                print("[TechGAR] Chưa có repo TechGAR riêng. Đặt TECHGAR_ROOT tới thư mục backend/main_detect; "
-                      "lựa chọn 1 và 3 vẫn chạy độc lập.")
-                continue
-
         speed = select_speed()
         if speed is None:
             continue
@@ -241,7 +227,7 @@ def main():
 
         algo_names = {
             "1": "Thuật toán 1 (YOLO11s Tiling 2x2 + ByteTrack - Quan sát Ô tô & Xe máy nhỏ)",
-            "2": "Thuật toán 2 (TechGAR Motion Tracker - Đối chứng)",
+            "2": "Thuật toán 2 (MOG2 trừ nền + Kalman, độc lập)",
             "3": "Thuật toán 3 (YOLOv8n Baseline + ByteTrack)",
         }
 
@@ -279,7 +265,7 @@ def main():
                     cmd.append("--save-video")
                 subprocess.run(cmd, check=True)
             elif algo == "2":
-                script = str(SRC_DIR / "single_camera.py")
+                script = str(SRC_DIR / "motion_camera.py")
                 cmd = [py_exe, script, "--source", source, "--output", str(output_dir), "--show", "--width", str(speed["cli_width"])]
                 if save_mp4:
                     cmd.append("--save-video")

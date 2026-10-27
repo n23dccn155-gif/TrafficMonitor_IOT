@@ -8,7 +8,7 @@ Ngày 27/10/2026. Người dùng xác nhận `vd3` được quay ở **tốc đ�
 - Ảnh `outputs/vd3_comparison_180/frame_120.jpg`; video YOLO `outputs/vd3_yolo_180/annotated.mp4`; video TechGAR `outputs/vd3_techgar_180/annotated.mp4`. Các file này [không có sau khi clone](LOCAL_ARTIFACTS.md).
 - Mỗi thư mục output có `tracks.jsonl` và `summary.json`. ID do hai tracker cấp độc lập; ID số 5 của bên này không phải ID số 5 của bên kia.
 
-Muốn chạy lại phép thử, cần có `data/raw/vd3.mp4` và repo TechGAR riêng (đặt `TECHGAR_ROOT` theo [README](../README.md)). Từ terminal IDE ở thư mục `TrafficMonitor_IoT`, chạy lần lượt:
+Muốn chạy lại **phép thử lịch sử này**, cần có `data/raw/vd3.mp4` và mã TechGAR riêng. Đặt biến môi trường `TECHGAR_ROOT` trỏ tới thư mục `backend\main_detect` chứa `src\techgar\motion_tracker.py`. Ví dụ trong PowerShell: `$env:TECHGAR_ROOT = 'D:\duong-dan\backend\main_detect'`. Đây không phải bước cần thiết để chạy ba lựa chọn trong `menu.py`. Từ terminal IDE ở thư mục `TrafficMonitor_IoT`, chạy lần lượt:
 
 ```powershell
 .\.venv\Scripts\python.exe src\traffic_monitor\yolo_camera.py --source data\raw\vd3.mp4 --output outputs\vd3_yolo_180 --width 640 --max-frames 180 --save-video

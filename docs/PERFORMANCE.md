@@ -5,24 +5,26 @@
 ## Vì sao ba lựa chọn khác nhau
 
 - **1 — YOLO11s chia 4 ô:** chạy detector bốn lần cho mỗi frame để nhìn xe máy nhỏ. Đây là phần tốn CPU nhất; giảm độ rộng giúp nhanh hơn nhưng xe nhỏ có thể khó thấy hơn.
-- **2 — TechGAR MOG2:** xử lý vùng chuyển động, hình thái học và ghép quỹ đạo trên nhiều điểm ảnh. Chi phí tăng rất mạnh khi tăng độ phân giải. Nó không phân loại xe; hạ độ phân giải có thể làm xe nhỏ biến mất hoặc box sai.
+- **2 — MOG2 + Kalman trong repo:** xử lý vùng chuyển động, hình thái học và ghép quỹ đạo trên nhiều điểm ảnh. Chi phí tăng khi tăng độ phân giải hoặc số vùng chuyển động. Nó không phân loại xe; hạ độ phân giải có thể làm xe nhỏ biến mất hoặc box sai.
 - **3 — YOLOv8n:** model nhỏ, chạy một lần trên toàn frame. Thường cập nhật cửa sổ nhanh hơn lựa chọn 1, nhưng dễ bỏ sót xe máy rất nhỏ.
 
-CPU phải làm lần lượt các bước của một frame: giải mã MP4 → đổi kích thước → tìm box → ghép box với ID cũ → vẽ quỹ đạo → hiển thị/ghi file. YOLO tốn phần lớn thời gian ở các phép tích chập của mạng nơ-ron; chia bốn ô nhân số lượt suy luận. TechGAR MOG2 không chạy mạng nơ-ron nhưng vẫn cập nhật mô hình nền, làm sạch mask và ghép nhiều vùng chuyển động; số điểm ảnh lớn và nhiều vùng nhiễu đều tăng chi phí. ByteTrack còn ghép ID theo từng frame, nên không thể xử lý các frame của một video hoàn toàn độc lập nếu muốn giữ ID liên tục.
+CPU phải làm lần lượt các bước của một frame: giải mã MP4 → đổi kích thước → tìm box → ghép box với ID cũ → vẽ quỹ đạo → hiển thị/ghi file. YOLO tốn phần lớn thời gian ở các phép tích chập của mạng nơ-ron; chia bốn ô nhân số lượt suy luận. MOG2 không chạy mạng nơ-ron nhưng vẫn cập nhật mô hình nền, làm sạch mask và ghép nhiều vùng chuyển động; số điểm ảnh lớn và nhiều vùng nhiễu đều tăng chi phí. ByteTrack và Kalman đều cần xử lý frame theo thứ tự để giữ ID liên tục.
 
-Máy kiểm tra dùng PyTorch CPU (`torch.cuda.is_available() == False`). Hai pipeline YOLO hiện tự chọn CUDA nếu môi trường PyTorch có GPU tương thích; TechGAR vẫn là pipeline OpenCV/CPU. Đây là nút thắt hiệu năng của máy đã đo, chưa phải giới hạn cố định của mọi phần cứng: GPU tương thích, model nhẹ hơn, ROI, độ phân giải thấp hơn hoặc camera gần hơn có thể thay đổi kết quả. Không nên tuyên bố một cấu hình đạt thời gian thực trước khi đo trên máy đích.
+Máy kiểm tra dùng PyTorch CPU (`torch.cuda.is_available() == False`). Hai pipeline YOLO hiện tự chọn CUDA nếu môi trường PyTorch có GPU tương thích; lựa chọn 2 dùng OpenCV/CPU. Đây là nút thắt hiệu năng của máy đã đo, chưa phải giới hạn cố định của mọi phần cứng: GPU tương thích, model nhẹ hơn, ROI, độ phân giải thấp hơn hoặc camera gần hơn có thể thay đổi kết quả. Không nên tuyên bố một cấu hình đạt thời gian thực trước khi đo trên máy đích.
 
-## Số đo kiểm tra nhanh ngày 27/10/2026
+## Số đo kiểm tra nhanh ngày 27/10/2026 (pipeline cũ)
 
 Cùng **45 frame đầu `vd3`**, chạy lần lượt một tiến trình trên CPU, rộng 640 px, không mở cửa sổ và không mã hóa MP4:
 
 | Pipeline | FPS xử lý | Quan sát/45 frame | Lưu ý |
 | --- | ---: | ---: | --- |
 | 1 YOLO11s chia 4 ô | 3,79 | 1.171 | 4 lần suy luận/frame |
-| 2 TechGAR MOG2 | 22,71 | 137 | Ngưỡng blob đang giữ theo cấu hình gốc; nhiều xe nhỏ có thể bị lọc |
+| TechGAR MOG2 cũ | 22,71 | 137 | Không còn là lựa chọn 2 trong menu; nhiều xe nhỏ có thể bị lọc |
 | 3 YOLOv8n | 10,83 | 516 | Có chi phí khởi tạo tracker ở đầu phép thử |
 
-Số quan sát và số ID **không phải** số xe đúng hoặc độ chính xác. Phép thử ngắn, không có GUI; tốc độ khi xem trực tiếp có thể thấp hơn. Các lượt cũ ở 1280 px với GUI/ghi video cho TechGAR khoảng 1,45 FPS và YOLOv8n khoảng 9,39 FPS; điều kiện khác nhau nên chỉ dùng để giải thích cảm giác lag, không dùng xếp hạng model.
+Số quan sát và số ID **không phải** số xe đúng hoặc độ chính xác. Phép thử ngắn, không có GUI; tốc độ khi xem trực tiếp có thể thấp hơn. Dòng TechGAR là dữ liệu lịch sử, **không đại diện cho lựa chọn 2 MOG2 + Kalman mới**. Các lượt cũ ở 1280 px với GUI/ghi video cho TechGAR khoảng 1,45 FPS và YOLOv8n khoảng 9,39 FPS; điều kiện khác nhau nên chỉ dùng để giải thích cảm giác lag, không dùng xếp hạng model.
+
+Sau khi chuyển lựa chọn 2 sang MOG2 + Kalman độc lập, đã chạy hết 2.466 frame `vd3` ở 640 px trên CPU, không mở GUI/ghi MP4: 23,41 giây, khoảng 105 FPS xử lý. Tracker tạo 834 ID; con số lớn này có thể gồm xe bị tách thành nhiều ID, bóng hoặc vùng chuyển động khác, **không đo độ chính xác**. Tốc độ hiển thị thực tế sẽ thấp hơn và cần đo trên máy của từng người.
 
 ## Cách dùng sau thay đổi
 
