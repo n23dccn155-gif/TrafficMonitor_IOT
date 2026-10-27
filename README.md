@@ -53,4 +53,4 @@ Không có repo TechGAR, lựa chọn 1 và 3 vẫn hoạt động; menu sẽ b�
 
 ## Giấy phép và dữ liệu
 
-[Ultralytics công bố YOLO và weights theo AGPL-3.0 hoặc Enterprise](https://www.ultralytics.com/license); [Supervision dùng MIT](https://github.com/roboflow/supervision/blob/develop/LICENSE.md). Trước khi công bố repo hoặc dùng cho sản phẩm, nhóm cần xác định giấy phép dự án phù hợp; các clip YouTube không được tự động đưa lên Git vì chưa xác minh quyền tái phân phối. Số ID sinh ra không thay thế đánh giá bằng nhãn xe thật. Xem [kế hoạch](docs/IMPLEMENTATION_PLAN.md) và [danh mục clip](data/CLIP_CATALOG.md).
+Mã nguồn dự án được phát hành theo [GNU AGPL-3.0](LICENSE). [Ultralytics công bố YOLO và weights theo AGPL-3.0 hoặc Enterprise](https://www.ultralytics.com/license); [Supervision dùng MIT](https://github.com/roboflow/supervision/blob/develop/LICENSE.md). Giấy phép mã nguồn **không** cấp quyền tái phân phối các clip YouTube, nên video gốc không được đưa lên Git. Số ID sinh ra không thay thế đánh giá bằng nhãn xe thật. Xem [kế hoạch](docs/IMPLEMENTATION_PLAN.md) và [danh mục clip](data/CLIP_CATALOG.md).
