@@ -1,0 +1,2865 @@
+"""Fallback tracker cho camera bãi xe nhìn từ trên cao.
+
+COCO YOLO không nhận được xe quá nhỏ/nhìn top-down trong video carPark mẫu.
+Backend này dùng foreground motion để tạo detection, nhưng thay Particle Filter
+cũ bằng Kalman constant-velocity + global assignment (LAPJV) + HSV appearance
+histogram để hạn chế đổi ID và hỗ trợ Re-ID ngắn hạn.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from collections import deque
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import cv2
+import numpy as np
+try:  # Prefer lapx's compiled solver, but a blocked/missing DLL must not
+    # take the whole tracking pipeline down with it.
+    from lap import lapjv
+
+    _HAS_LAP = True
+except ImportError:  # pragma: no cover - depends on the host machine
+    from scipy.optimize import linear_sum_assignment
+
+    _HAS_LAP = False
+
+    def lapjv(costs, extend_cost: bool = False, cost_limit: float = float("inf")):
+        """Stand-in for ``lap.lapjv`` when the lapx DLL cannot be imported.
+
+        Keeps the reference semantics used by this tracker: each row takes at
+        most one column, and a pair costing more than ``cost_limit`` is left
+        unassigned (``-1``) instead of being forced.
+        """
+        costs = np.asarray(costs, dtype=np.float64)
+        row_count, col_count = costs.shape
+        row_to_col = np.full(row_count, -1, dtype=np.int32)
+        col_to_row = np.full(col_count, -1, dtype=np.int32)
+        if row_count == 0 or col_count == 0:
+            return 0.0, row_to_col, col_to_row
+
+        # Padding lets a row/column pay ``skip_cost`` to stay unmatched, which
+        # reproduces how the real solver refuses pairs above cost_limit.
+        blocked = max(1e6, float(np.sum(np.abs(costs))) + 1.0)
+        skip_cost = float(cost_limit) if np.isfinite(cost_limit) else blocked
+        size = row_count + col_count
+        padded = np.full((size, size), blocked, dtype=np.float64)
+        padded[:row_count, :col_count] = costs
+        for row in range(row_count):
+            padded[row, col_count + row] = skip_cost
+        for col in range(col_count):
+            padded[row_count + col, col] = skip_cost
+        padded[row_count:, col_count:] = 0.0
+
+        rows, cols = linear_sum_assignment(padded)
+        total = 0.0
+        for row, col in zip(rows, cols):
+            if row < row_count and col < col_count:
+                row_to_col[row] = int(col)
+                total += float(costs[row, col])
+        for row, col in enumerate(row_to_col):
+            if col >= 0:
+                col_to_row[col] = row
+        return total, row_to_col, col_to_row
+
+from .tracklet_descriptor import (
+    AppearanceTracklet,
+    compare_tracklets,
+    compute_sample_quality,
+    histogram_distance,
+    hsv_histogram,
+    spatial_histograms,
+    spatial_distance,
+)
+from .vehicle_tracker import TrackStatus, TrackedVehicle
+from .occlusion_guard import OcclusionGuard
+
+# P38/BISECT (measurement only): env switches to disable T24 steps B3/B4 for one
+# run. Default OFF => unchanged behaviour.
+#   B3: stop a stale LOST track from emitting its old GID as a fresh observation
+#   B4: Kalman transition matrix follows the real source dt
+_P38_DISABLE_B3 = os.environ.get("P38_DISABLE_B3") == "1"
+_P38_DISABLE_B4 = os.environ.get("P38_DISABLE_B4") == "1"
+# P38/BISECT2: B5 stays ON. Measured on p37_score (sang494 s1/s4, toi2100 s1,
+# legacy+world): turning B5 off is WORSE in 5/6 configs
+#   sang494_s1 legacy 0/0/0 .9479 -> 2/1/0 .9240
+#   sang494_s4 world  4/4/1 .8744 -> 5/5/2 .8762 (IDSW/FRAG/MIX tang)
+#   toi2100_s1 world  1/1/0 .9008 -> 2/2/0 .8857
+# so the merged-competition freeze is load-bearing. The p28/V060 gain seen in the
+# full-run bisect is not worth these regressions.
+_ENABLE_B5_MERGED_FREEZE = True
+_P38_DISABLE_B5 = not _ENABLE_B5_MERGED_FREEZE
+
+#: P26: biên độ dịch chuyển tối đa (px) trong vài mẫu gần nhất để coi một
+#: fragment là "đứng yên tại chỗ". Xe đang chạy vượt xa ngưỡng này rất nhanh.
+STATIONARY_AT_REST_PX: float = 4.0
+
+
+class MotionVehicleTracker:
+    """Tracker không phụ thuộc model, tối ưu cho camera cố định có xe chuyển động."""
+
+    def __init__(
+        self,
+        min_visible_count: int = 3,
+        lost_track_ttl: int = 90,
+        # P26 (lead duyet 5.2): giu fragment dung yen da duoc thay that khi
+        # detector bo mat no vai giay (xe do roi nhich lai). Tat bang
+        # ``--legacy-stationary-ttl``.
+        hold_stationary_fragment_ttl: bool = True,
+        history_len: int = 10,
+        min_area: int = 650,
+        min_width: int = 22,
+        min_height: int = 18,
+        max_distance: float = 180.0,
+        min_confirm_displacement: float = 12.0,
+        motion_frame_gap: int = 3,
+        motion_threshold: int = 25,
+        motion_min_ratio: float = 0.08,
+        motion_min_pixels: int = 160,
+        reid_ttl: int = 720,
+        homography: Optional[np.ndarray] = None,
+        tracklet_max_samples: int = 12,
+        tracklet_sample_interval: int = 3,
+        slot_binder=None,  # SlotVehicleBinder instance (optional)
+        temporal_short_seconds: float = 0.25,
+        temporal_long_seconds: float = 0.80,
+        motion_long_frame_gap: int = 9,
+        priority_min_area: int = 350,
+        priority_motion_min_ratio: float = 0.03,
+        priority_motion_min_pixels: int = 50,
+        priority_min_visible_count: int = 2,
+        priority_min_confirm_displacement: float = 3.0,
+        enable_multiscale_motion: bool = False,
+        reject_cast_shadows: bool = False,
+        shadow_attenuation_range: Tuple[float, float] = (0.32, 0.62),
+        shadow_max_chromaticity_distance: float = 0.10,
+        shadow_max_scaled_residual: float = 0.08,
+        shadow_min_explained_fraction: float = 0.75,
+        shadow_min_pixels: int = 120,
+        reacquire_max_seconds: float = 1.50,
+        merged_reacquire_max_seconds: float = 3.0,
+        lost_track_ttl_seconds: Optional[float] = None,
+        lost_track_ttl_reacquire_multiple: float = 1.5,
+        assignment_cost_limit: float = 0.90,
+        motion_trail_elongation_frames: float = 1.75,
+        velocity_gate_scale: float = 2.0,
+        velocity_gate_size_ratio: float = 1.0,
+        velocity_gate_min_observations: int = 3,
+        max_prediction_age_seconds: float = 0.40,
+        prediction_velocity_decay_seconds: float = 0.25,
+        prediction_max_distance_scale: float = 1.25,
+        association_ambiguity_margin: Optional[float] = None,
+        ambiguous_recovery_frames: int = 3,
+        split_assignment_margin: float = 0.08,
+        lost_appearance_threshold: float = 0.30,
+        min_reacquire_area_ratio: float = 0.35,
+        max_reacquire_area_ratio: float = 2.80,
+        merged_detection_area_ratio: float = 1.60,
+        max_bbox_width_ratio: float = 0.30,
+        max_bbox_height_ratio: float = 0.42,
+        max_bbox_area_ratio: float = 0.12,
+        motion_join_kernel_size: int = 5,
+        motion_join_iterations: int = 1,
+        enable_occlusion_guard: bool = True,
+        enable_watershed: bool = True,
+        enable_spatial_appearance: bool = True,
+        roi_context_padding_px: int = 0,
+    ):
+        self.min_visible_count = max(1, min_visible_count)
+        self.lost_track_ttl = max(1, lost_track_ttl)
+        self.hold_stationary_fragment_ttl = bool(hold_stationary_fragment_ttl)
+        self.history_len = max(2, history_len)
+        self.min_area = min_area
+        self.min_width = min_width
+        self.min_height = min_height
+        self.max_distance = max_distance
+        self.min_confirm_displacement = float(min_confirm_displacement)
+        self.motion_frame_gap = max(1, int(motion_frame_gap))
+        self.motion_threshold = int(motion_threshold)
+        self.motion_min_ratio = float(motion_min_ratio)
+        self.motion_min_pixels = int(motion_min_pixels)
+        self.temporal_short_seconds = max(0.01, float(temporal_short_seconds))
+        self.temporal_long_seconds = max(self.temporal_short_seconds, float(temporal_long_seconds))
+        self.motion_long_frame_gap = max(self.motion_frame_gap, int(motion_long_frame_gap))
+        self.priority_min_area = max(1, int(priority_min_area))
+        self.priority_motion_min_ratio = max(0.0, float(priority_motion_min_ratio))
+        self.priority_motion_min_pixels = max(1, int(priority_motion_min_pixels))
+        self.priority_min_visible_count = max(2, int(priority_min_visible_count))
+        self.priority_min_confirm_displacement = max(0.0, float(priority_min_confirm_displacement))
+        self.enable_multiscale_motion = bool(enable_multiscale_motion)
+        self.reject_cast_shadows = bool(reject_cast_shadows)
+        self.shadow_min_attenuation = min(
+            float(shadow_attenuation_range[0]),
+            float(shadow_attenuation_range[1]),
+        )
+        self.shadow_max_attenuation = max(
+            float(shadow_attenuation_range[0]),
+            float(shadow_attenuation_range[1]),
+        )
+        self.shadow_max_chromaticity_distance = max(
+            0.0, float(shadow_max_chromaticity_distance)
+        )
+        self.shadow_max_scaled_residual = max(0.0, float(shadow_max_scaled_residual))
+        self.shadow_min_explained_fraction = min(
+            1.0, max(0.0, float(shadow_min_explained_fraction))
+        )
+        self.shadow_min_pixels = max(20, int(shadow_min_pixels))
+        self.reacquire_max_seconds = max(0.05, float(reacquire_max_seconds))
+        self.merged_reacquire_max_seconds = max(
+            self.reacquire_max_seconds,
+            float(merged_reacquire_max_seconds),
+        )
+        self.split_assignment_margin = max(
+            0.0, float(split_assignment_margin)
+        )
+        # A LOST fragment that can no longer be re-associated must also leave
+        # the candidate pool. ``lost_track_ttl`` is counted in frames, so at a
+        # low effective FPS it kept unreacquirable tracks alive for many
+        # seconds after their reacquire window closed; they then crowded the
+        # assignment problem and the merged-contour heuristic. The real bound
+        # is a duration, so derive one from the widest reacquire window.
+        self.lost_track_ttl_seconds = (
+            float(lost_track_ttl_seconds)
+            if lost_track_ttl_seconds is not None
+            else max(1.0, float(lost_track_ttl_reacquire_multiple))
+            * self.merged_reacquire_max_seconds
+        )
+        # Maximum association cost LAPJV may accept. The cost terms sum to at
+        # most 1.0, so the historical 0.90 admitted nearly every pair that
+        # passed the gates.
+        self.assignment_cost_limit = float(np.clip(assignment_cost_limit, 0.05, 1.0))
+        self.motion_trail_elongation_frames = max(
+            0.0, float(motion_trail_elongation_frames)
+        )
+        self.velocity_gate_scale = max(1.0, float(velocity_gate_scale))
+        self.velocity_gate_size_ratio = max(0.0, float(velocity_gate_size_ratio))
+        self.velocity_gate_min_observations = max(2, int(velocity_gate_min_observations))
+        self.max_prediction_age_seconds = max(
+            0.05, float(max_prediction_age_seconds)
+        )
+        self.prediction_velocity_decay_seconds = max(
+            0.05, float(prediction_velocity_decay_seconds)
+        )
+        self.prediction_max_distance_scale = max(
+            1.0, float(prediction_max_distance_scale)
+        )
+        self.association_ambiguity_margin = max(
+            0.0,
+            float(
+                split_assignment_margin
+                if association_ambiguity_margin is None
+                else association_ambiguity_margin
+            ),
+        )
+        self.ambiguous_recovery_frames = max(1, int(ambiguous_recovery_frames))
+        self.lost_appearance_threshold = max(0.0, float(lost_appearance_threshold))
+        self.min_reacquire_area_ratio = max(0.01, float(min_reacquire_area_ratio))
+        self.max_reacquire_area_ratio = max(
+            self.min_reacquire_area_ratio, float(max_reacquire_area_ratio)
+        )
+        self.merged_detection_area_ratio = max(
+            1.05, float(merged_detection_area_ratio)
+        )
+        self.max_bbox_width_ratio = min(1.0, max(0.05, float(max_bbox_width_ratio)))
+        self.max_bbox_height_ratio = min(1.0, max(0.05, float(max_bbox_height_ratio)))
+        self.max_bbox_area_ratio = min(1.0, max(0.01, float(max_bbox_area_ratio)))
+        join_kernel_size = max(3, int(motion_join_kernel_size))
+        self.motion_join_kernel_size = (
+            join_kernel_size if join_kernel_size % 2 else join_kernel_size + 1
+        )
+        self.motion_join_iterations = max(1, int(motion_join_iterations))
+        # Fixed OpenCV morphology kernels are shared by both mask pipelines.
+        self._motion_open_kernel = np.ones((3, 3), np.uint8)
+        self._motion_dilate_kernel = np.ones((5, 5), np.uint8)
+        self._motion_support_kernel = np.ones((17, 17), np.uint8)
+        self._motion_join_kernel = np.ones(
+            (self.motion_join_kernel_size, self.motion_join_kernel_size), np.uint8
+        )
+        self.reid_ttl = max(reid_ttl, lost_track_ttl)
+        self.homography = homography
+        self.tracklet_max_samples = max(1, int(tracklet_max_samples))
+        self.tracklet_sample_interval = max(1, int(tracklet_sample_interval))
+        self.bg_sub = cv2.createBackgroundSubtractorMOG2(history=700, varThreshold=32, detectShadows=True)
+        self._tracks: Dict[int, TrackedVehicle] = {}
+        self._exited_tracks: Dict[int, TrackedVehicle] = {}
+        self._next_id = 1
+        self._frame_idx = 0
+        # The tracker processes fewer frames than the source in live replay.
+        # Keep processed-frame counters for existing lifecycle/golden semantics,
+        # but use source-frame deltas for the physical motion model.
+        self._source_frame_idx = 0
+        self._last_source_frame_idx = None
+        self._source_dt = 1
+        self._last_kalman_dt = 1
+        self.roi_mask: Optional[np.ndarray] = None
+        # MOG2 and temporal differences only need the observation ROI.  Keep
+        # the full-frame coordinates for association and cross-camera logic.
+        self.fast_motion = False
+        self.fast_motion_scale = 0.5
+        self._motion_roi_key = None
+        self._motion_roi_bounds = None
+        # Keep enough samples for the 0.8 s slow-motion reference at common
+        # DroidCam frame rates. Entries are (timestamp_s, frame_index, gray).
+        self._gray_history = deque(maxlen=max(48, self.motion_long_frame_gap + 2))
+        self._current_timestamp_s: Optional[float] = None
+        self.slot_binder = slot_binder  # Tham chiếu tới SlotVehicleBinder
+        self._newly_lost_tracks: List[Tuple[int, TrackedVehicle]] = []
+        self._last_shadow_rejections: List[dict] = []
+        self._last_detection_rejections: List[dict] = []
+        # Pixel anchor points of this frame's ROI-rejected detections, so a
+        # coasting track starved by rejections near its prediction can mark
+        # the vanish as an ROI-edge dead zone.
+        self._roi_rejected_points: List[Tuple[int, int]] = []
+        self._suspended_tracks: Dict[int, TrackedVehicle] = {}
+        self._ambiguous_detection_ids: set[int] = set()
+        self._viable_pairs: set[Tuple[int, int]] = set()
+        self._pair_metrics: Dict[Tuple[int, int], dict] = {}
+        self._suppressed_roi_edge_twin_ids: set[int] = set()
+        self._last_association_events: List[dict] = []
+        self._background_image: Optional[np.ndarray] = None
+        self._background_frame: Optional[int] = None
+        self.occlusion_guard = OcclusionGuard(self.merged_reacquire_max_seconds)
+        self.enable_occlusion_guard = bool(enable_occlusion_guard)
+        self.enable_watershed = bool(enable_watershed)
+        self.enable_spatial_appearance = bool(enable_spatial_appearance)
+        self.roi_context_padding_px = max(0, int(roi_context_padding_px))
+        self._roi_context_source_id: Optional[int] = None
+        self._roi_context_mask: Optional[np.ndarray] = None
+        self._predictions_frame = -1
+        self._predictions = {}
+
+    def _predict_tracks(self):
+        if self._predictions_frame != self._frame_idx:
+            self._predictions = {}
+            # BISECT: `P38_DISABLE_B4=1` forces the pre-T24 fixed dt=1.
+            dt = 1.0 if _P38_DISABLE_B4 else float(self._source_dt)
+            for track in self._tracks.values():
+                kalman = track.kalman
+                # A new track starts with Kalman dt=1 even when the previous
+                # frame already used the current source stride. Check each
+                # matrix, not only the tracker's cached last dt.
+                if float(kalman.transitionMatrix[0, 2]) != dt:
+                    kalman.transitionMatrix[0, 2] = dt
+                    kalman.transitionMatrix[1, 3] = dt
+                    kalman.processNoiseCov = np.diag(
+                        [2.0 * dt * dt, 2.0 * dt * dt, 12.0 * dt, 12.0 * dt]
+                    ).astype(np.float32)
+            self._last_kalman_dt = self._source_dt
+            for tid, track in self._tracks.items():
+                if str(getattr(track, "association_state", "")).startswith(
+                    "suspended_"
+                ):
+                    continue
+                predicted = track.kalman.predict()
+                raw_point = np.asarray(
+                    [float(predicted[0, 0]), float(predicted[1, 0])],
+                    dtype=np.float64,
+                )
+                measured = getattr(track, "last_measured_center", None)
+                if measured is None:
+                    measured = (float(track.cx), float(track.cy))
+                measured_point = np.asarray(measured, dtype=np.float64)
+                age = self._prediction_age_seconds(track)
+                track.prediction_age_s = float(age)
+                if int(getattr(track, "consecutive_invisible_count", 0)) > 0:
+                    # A stopped car often leaves no foreground pixels.  Do not
+                    # let its old velocity carry the identity along the path
+                    # of a neighbouring moving car.
+                    merged_freeze = (
+                        getattr(track, "last_ambiguous_kind", None) == "merged"
+                    )
+                    if _P38_DISABLE_B5:
+                        # BISECT: pre-T24 behaviour -- no merged-competition freeze.
+                        merged_freeze = False
+                    decay = float(
+                        np.exp(-age / self.prediction_velocity_decay_seconds)
+                    )
+                    if age > self._prediction_age_limit_seconds(track):
+                        point = measured_point
+                        track.prediction_source = "stale_prediction"
+                        track.velocity_confidence = 0.0
+                    elif merged_freeze:
+                        # An explicit two-car occlusion is the exception: the
+                        # occlusion guard needs the constant-velocity corridor
+                        # until the pair separates.
+                        point = raw_point
+                        track.prediction_source = "kalman_prediction"
+                        track.velocity_confidence = 1.0
+                    else:
+                        point = measured_point + (raw_point - measured_point) * decay
+                        track.prediction_source = "kalman_prediction"
+                        track.velocity_confidence = float(
+                            np.clip(
+                                1.0
+                                - age
+                                / max(self._prediction_age_limit_seconds(track), 1e-6),
+                                0.0,
+                                1.0,
+                            )
+                        )
+                else:
+                    point = raw_point
+                    track.prediction_source = "kalman_prediction"
+                    track.velocity_confidence = 1.0
+                self._predictions[tid] = int(round(point[0])), int(round(point[1]))
+            self._predictions_frame = self._frame_idx
+        return self._predictions
+
+    def _prediction_age_seconds(self, track: TrackedVehicle) -> float:
+        """Age of the last real measurement, independent of display FPS."""
+        last_timestamp = getattr(track, "last_measured_timestamp_s", None)
+        if last_timestamp is None:
+            last_timestamp = getattr(track, "last_seen_timestamp_s", None)
+        if self._current_timestamp_s is not None and last_timestamp is not None:
+            return max(0.0, float(self._current_timestamp_s) - float(last_timestamp))
+        last_frame = getattr(track, "last_seen_frame", self._frame_idx)
+        return max(0.0, float(self._frame_idx - int(last_frame)) / 30.0)
+
+    def _prediction_age_limit_seconds(self, track: TrackedVehicle) -> float:
+        """Maximum age for an ordinary Kalman prediction to claim a blob."""
+        if (
+            getattr(track, "last_ambiguous_kind", None) == "merged"
+            and self._has_recent_merged_freeze(track)
+        ):
+            return max(
+                self.max_prediction_age_seconds,
+                self.merged_reacquire_max_seconds,
+            )
+        return self.max_prediction_age_seconds
+
+    def _remember_clean(self, track, detection):
+        now = self._current_timestamp_s
+        if now is None:
+            now = self._frame_idx / 30.0
+        samples = list(getattr(track, 'clean_observations', []))
+        if not samples or now > samples[-1][0]:
+            samples.append((now, detection['point'], detection['box']))
+        track.clean_observations = samples[-8:]
+        track.observation_kind = 'detection'
+
+    def _tracks_proven_independent(self, left: TrackedVehicle, right: TrackedVehicle) -> bool:
+        """Whether two lineages were simultaneously visible as separate cars.
+
+        A dark vehicle often appears first as a small fragment and one frame
+        later as a larger contour.  Treating those overlapping fragments as
+        two independent cars makes the ambiguity guard freeze the real car.
+        Independence therefore needs concurrent, spatially distinct clean
+        measurements rather than merely two local-track objects.
+        """
+        left_samples = list(getattr(left, "clean_observations", ()) or ())[-6:]
+        right_samples = list(getattr(right, "clean_observations", ()) or ())[-6:]
+        for left_time, left_point, left_box in reversed(left_samples):
+            for right_time, right_point, right_box in reversed(right_samples):
+                if abs(float(left_time) - float(right_time)) > 0.25:
+                    continue
+                left_diag = float(np.hypot(left_box[2], left_box[3]))
+                right_diag = float(np.hypot(right_box[2], right_box[3]))
+                separation = float(
+                    np.linalg.norm(np.subtract(left_point, right_point))
+                )
+                if (
+                    self._iou(left_box, right_box) <= 0.20
+                    and separation >= 0.35 * max(1.0, min(left_diag, right_diag))
+                ):
+                    return True
+        return False
+
+    def _clean_size(self, track):
+        if self.enable_occlusion_guard:
+            for group in self.occlusion_guard.groups.values():
+                if track.track_id in group.references:
+                    return group.references[track.track_id]
+            return self.occlusion_guard.reference(track)
+        return float(track.w), float(track.h)
+
+    def _unresolved_merged_birth(self, detection):
+        """A timed-out group is not permission to mint an ID for its joint blob.
+
+        This is only a birth veto, never permission for a stale track to claim
+        a new detection. It ends at the ordinary local-track retention bound.
+        """
+        if not self.enable_occlusion_guard:
+            return False
+        x,y,w,h = detection['box']
+        owners = set()
+        now = self._current_timestamp_s if self._current_timestamp_s is not None else self._frame_idx/30.
+        for tid,track in self._tracks.items():
+            samples = getattr(track, 'clean_observations', [])
+            last = getattr(track, 'last_seen_timestamp_s', None)
+            if len(samples) < 3 or (last is not None and now-last > self.lost_track_ttl_seconds):
+                continue
+            cx,cy = track.cx,track.cy-track.h/2
+            if x <= cx <= x+w and y <= cy <= y+h and w*h >= 1.6*np.prod(self._clean_size(track)):
+                owners.add(tid)
+        if any(set(pair).issubset(owners) for pair in self.occlusion_guard.independent_pairs):
+            self._last_association_events.append({
+                'type':'new_local_id_deferred_unresolved_merge',
+                'local_track_ids':sorted(owners), 'bbox':list(detection['box']),
+            })
+            return True
+        return False
+
+    @staticmethod
+    def _bottom_center(box: Tuple[int, int, int, int]) -> Tuple[int, int]:
+        x, y, w, h = box
+        return x + w // 2, y + h
+
+    @staticmethod
+    def _iou(left: Tuple[int, int, int, int], right: Tuple[int, int, int, int]) -> float:
+        ax, ay, aw, ah = left
+        bx, by, bw, bh = right
+        ix1, iy1 = max(ax, bx), max(ay, by)
+        ix2, iy2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+        intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        union = aw * ah + bw * bh - intersection
+        return intersection / union if union else 0.0
+
+    @staticmethod
+    def _box_gap(left: Tuple[int, int, int, int], right: Tuple[int, int, int, int]) -> float:
+        """Shortest edge-to-edge distance between two axis-aligned boxes."""
+        ax, ay, aw, ah = left
+        bx, by, bw, bh = right
+        dx = max(ax - (bx + bw), bx - (ax + aw), 0)
+        dy = max(ay - (by + bh), by - (ay + ah), 0)
+        return float(np.hypot(dx, dy))
+
+    @staticmethod
+    def _histogram(
+        frame: np.ndarray,
+        box: Tuple[int, int, int, int],
+        mask: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        """Compute appearance histogram with quality filtering.
+
+        Priority 8: Reject low-quality samples (too small, mostly background)
+        to prevent noisy histograms from entering the gallery.
+        """
+        # Quality check before computing histogram
+        quality = compute_sample_quality(frame, box, mask)
+        if quality < 0.5:
+            return None  # Reject low-quality sample
+        return hsv_histogram(frame, box, mask=mask)
+
+    def _ground_point(self, point: Tuple[int, int]) -> Optional[Tuple[float, float]]:
+        if self.homography is None:
+            return None
+        source = np.array([[[point[0], point[1]]]], dtype=np.float32)
+        target = cv2.perspectiveTransform(source, self.homography.astype(np.float32))[0, 0]
+        return round(float(target[0]), 3), round(float(target[1]), 3)
+
+    @staticmethod
+    def _new_kalman(point: Tuple[int, int]) -> cv2.KalmanFilter:
+        kalman = cv2.KalmanFilter(4, 2)
+        kalman.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
+        kalman.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+        kalman.processNoiseCov = np.diag([2.0, 2.0, 12.0, 12.0]).astype(np.float32)
+        kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 8.0
+        kalman.errorCovPost = np.eye(4, dtype=np.float32) * 100.0
+        kalman.statePost = np.array([[point[0]], [point[1]], [0], [0]], dtype=np.float32)
+        return kalman
+
+    @staticmethod
+    def _motion_between(current: np.ndarray, reference: np.ndarray, threshold: int) -> np.ndarray:
+        """Return brightness-compensated change without treating a light shift as motion."""
+        brightness_shift = MotionVehicleTracker._brightness_shift(current, reference)
+        # Gray inputs are uint8 and the median of integral differences is
+        # always integral or half-integral.  Casting the clipped float32
+        # expression to uint8 equals a saturating add of floor(shift), for
+        # *both* positive and negative offsets.  Avoid two full-frame float
+        # buffers while retaining exactly the same pixel values.
+        brightness_offset = int(np.floor(brightness_shift))
+        adjusted_reference = (
+            reference if brightness_offset == 0
+            else cv2.add(reference, (brightness_offset,))
+        )
+        difference = cv2.absdiff(current, adjusted_reference)
+        _, return_mask = cv2.threshold(
+            difference, threshold, 255, cv2.THRESH_BINARY, difference
+        )
+        return return_mask
+
+    # Rows/columns kept when estimating the global brightness offset. The
+    # median of a full 1280x720 int16 difference costs ~17 ms and runs twice
+    # per frame per camera in multiscale mode, which is a third of the whole
+    # per-frame budget. A regular grid of ~128x128 samples of the same field
+    # reproduces that median to well under one grey level for ~0.3 ms, and the
+    # effective frame rate is what decides whether a moving vehicle stays
+    # associated at all.
+    _BRIGHTNESS_SAMPLE_TARGET = 128
+
+    @classmethod
+    def _brightness_shift(cls, current: np.ndarray, reference: np.ndarray) -> float:
+        """Median grey-level offset between two frames, from a coarse sample."""
+        step = max(
+            1,
+            min(
+                current.shape[0] // cls._BRIGHTNESS_SAMPLE_TARGET,
+                current.shape[1] // cls._BRIGHTNESS_SAMPLE_TARGET,
+            ),
+        )
+        sampled_current = current[::step, ::step].astype(np.int16)
+        sampled_reference = reference[::step, ::step].astype(np.int16)
+        return float(np.median(sampled_current - sampled_reference))
+
+    def _timestamp_references(self, timestamp_s: float) -> List[np.ndarray]:
+        history = list(self._gray_history)[:-1]
+        references: List[np.ndarray] = []
+        target_ages = (
+            (self.temporal_short_seconds, self.temporal_long_seconds)
+            if self.enable_multiscale_motion
+            else (self.temporal_short_seconds,)
+        )
+        for target_age in target_ages:
+            candidates = []
+            for old_timestamp, _frame_idx, gray in history:
+                if old_timestamp is None:
+                    continue
+                age = timestamp_s - old_timestamp
+                # A reference that is far older than requested commonly means
+                # a stream reconnect/pause. Comparing across it creates a
+                # full-frame flash, so wait for fresh history instead.
+                if target_age * 0.45 <= age <= target_age * 2.25:
+                    candidates.append((abs(age - target_age), gray))
+            if candidates:
+                references.append(min(candidates, key=lambda item: item[0])[1])
+        return references
+
+    def _frame_gap_references(self) -> List[np.ndarray]:
+        history = list(self._gray_history)
+        references: List[np.ndarray] = []
+        gaps = (
+            (self.motion_frame_gap, self.motion_long_frame_gap)
+            if self.enable_multiscale_motion
+            else (self.motion_frame_gap,)
+        )
+        for gap in gaps:
+            if len(history) > gap:
+                references.append(history[-gap - 1][2])
+        return references
+
+    def _temporal_motion_mask(
+        self,
+        frame: np.ndarray,
+        timestamp_s: Optional[float] = None,
+        frame_idx: Optional[int] = None,
+    ) -> np.ndarray:
+        """Chỉ giữ pixel thực sự thay đổi giữa hai thời điểm.
+
+        MOG2 có thể đánh dấu xe đỗ khi ánh sáng/nén video thay đổi. Frame
+        difference qua nhiều frame giúp bỏ các blob đứng yên. Median brightness
+        shift được trừ trước để không coi thay đổi phơi sáng toàn khung là xe.
+        """
+        gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+        valid_timestamp = None
+        if timestamp_s is not None and np.isfinite(timestamp_s):
+            valid_timestamp = float(timestamp_s)
+            previous_timestamps = [item[0] for item in self._gray_history if item[0] is not None]
+            if previous_timestamps and valid_timestamp < previous_timestamps[-1]:
+                # Timestamp regression means a seek/reconnect. Do not compare
+                # the new frame with an unrelated point in the old stream.
+                self._gray_history.clear()
+        self._gray_history.append((valid_timestamp, self._frame_idx if frame_idx is None else frame_idx, gray))
+        references = (
+            self._timestamp_references(valid_timestamp)
+            if valid_timestamp is not None
+            else self._frame_gap_references()
+        )
+        if not references:
+            return np.zeros_like(gray)
+
+        # Short-term motion catches fast vehicles; long-term motion accumulates
+        # enough displacement for vehicles moving only a few pixels per frame.
+        motion = np.zeros_like(gray)
+        for reference in references:
+            cv2.bitwise_or(
+                motion, self._motion_between(gray, reference, self.motion_threshold),
+                dst=motion,
+            )
+        motion = cv2.morphologyEx(motion, cv2.MORPH_OPEN, self._motion_open_kernel)
+        motion = cv2.dilate(motion, self._motion_dilate_kernel, iterations=2)
+        # Large closing kernels used to join two nearby moving toy cars into
+        # one foreground contour.  Keep enough closing to repair one car's
+        # broken silhouette, but not enough to bridge the lane between cars.
+        motion = cv2.morphologyEx(
+            motion,
+            cv2.MORPH_CLOSE,
+            self._motion_join_kernel,
+            iterations=self.motion_join_iterations,
+        )
+        return motion
+
+    @staticmethod
+    def _coerce_priority_polygon(region: Any) -> Optional[np.ndarray]:
+        if isinstance(region, dict):
+            region = region.get("polygon", region.get("points"))
+        elif hasattr(region, "polygon"):
+            region = getattr(region, "polygon")
+        if region is None:
+            return None
+        try:
+            polygon = np.asarray(region, dtype=np.int32).reshape(-1, 2)
+        except (TypeError, ValueError):
+            return None
+        return polygon if len(polygon) >= 3 else None
+
+    def _priority_mask(self, shape: Tuple[int, int], priority_regions: Optional[Sequence[Any]]) -> Optional[np.ndarray]:
+        if priority_regions is None:
+            return None
+        if isinstance(priority_regions, np.ndarray) and priority_regions.shape == shape:
+            return np.where(priority_regions > 0, 255, 0).astype(np.uint8)
+
+        regions: Any = priority_regions
+        try:
+            numeric = np.asarray(regions)
+            if numeric.ndim == 2 and numeric.shape[1] == 2 and numeric.dtype != object:
+                regions = [regions]
+        except (TypeError, ValueError):
+            pass
+        if isinstance(regions, dict) or hasattr(regions, "polygon"):
+            regions = [regions]
+
+        mask = np.zeros(shape, dtype=np.uint8)
+        for region in regions:
+            polygon = self._coerce_priority_polygon(region)
+            if polygon is not None:
+                cv2.fillPoly(mask, [polygon], 255)
+        return mask if cv2.countNonZero(mask) else None
+
+    @staticmethod
+    def _box_is_priority(
+        priority_mask: Optional[np.ndarray],
+        box: Tuple[int, int, int, int],
+        point: Tuple[int, int],
+    ) -> bool:
+        if priority_mask is None:
+            return False
+        x, y, w, h = box
+        height, width = priority_mask.shape[:2]
+        px, py = point
+        if 0 <= px < width and 0 <= py < height and priority_mask[py, px] != 0:
+            return True
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(width, x + w), min(height, y + h)
+        if x2 <= x1 or y2 <= y1:
+            return False
+        overlap = cv2.countNonZero(priority_mask[y1:y2, x1:x2])
+        return overlap / float(max(1, w * h)) >= 0.10
+
+    def _cast_shadow_metrics(
+        self,
+        frame: np.ndarray,
+        background: Optional[np.ndarray],
+        box: Tuple[int, int, int, int],
+        selection: np.ndarray,
+    ) -> Optional[dict]:
+        """Explain a foreground blob as a darker copy of the learned floor.
+
+        A cast shadow approximately multiplies all BGR channels of the visible
+        floor by one attenuation factor while preserving chromaticity and road
+        texture. A physical object instead occludes that texture, changes
+        colour, becomes brighter, or (for a truly dark object) falls below the
+        deliberately narrow attenuation band. The test is intentionally
+        fail-open: incomplete/young background evidence never rejects a blob.
+        """
+        if background is None or background.shape != frame.shape:
+            return None
+        x, y, width, height = box
+        if selection.shape != (height, width):
+            return None
+        selected = selection > 0
+        selected_count = int(np.count_nonzero(selected))
+        if selected_count < self.shadow_min_pixels:
+            return None
+
+        current_bgr = frame[y:y + height, x:x + width][selected].astype(np.float32)
+        background_bgr = background[y:y + height, x:x + width][selected].astype(np.float32)
+        luminance_weights = np.asarray([0.114, 0.587, 0.299], dtype=np.float32)
+        current_luminance = current_bgr @ luminance_weights
+        background_luminance = background_bgr @ luminance_weights
+        valid = (background_luminance >= 20.0) & (current_luminance >= 3.0)
+        valid_count = int(np.count_nonzero(valid))
+        if valid_count < self.shadow_min_pixels or valid_count < selected_count * 0.60:
+            return None
+
+        current_bgr = current_bgr[valid]
+        background_bgr = background_bgr[valid]
+        current_luminance = current_luminance[valid]
+        background_luminance = background_luminance[valid]
+        attenuation_values = current_luminance / np.maximum(background_luminance, 1e-3)
+        attenuation = float(np.median(attenuation_values))
+
+        current_chromaticity = current_bgr / np.maximum(
+            np.sum(current_bgr, axis=1, keepdims=True), 1e-3
+        )
+        background_chromaticity = background_bgr / np.maximum(
+            np.sum(background_bgr, axis=1, keepdims=True), 1e-3
+        )
+        chromaticity_distance = np.sum(
+            np.abs(current_chromaticity - background_chromaticity), axis=1
+        )
+        scaled_residual = np.abs(
+            current_luminance - attenuation * background_luminance
+        ) / np.maximum(background_luminance, 1e-3)
+        median_chromaticity_distance = float(np.median(chromaticity_distance))
+        median_scaled_residual = float(np.median(scaled_residual))
+
+        explained = (
+            (np.abs(attenuation_values - attenuation) <= 0.18)
+            & (chromaticity_distance <= self.shadow_max_chromaticity_distance * 1.20)
+            & (scaled_residual <= self.shadow_max_scaled_residual * 1.50)
+        )
+        explained_fraction = float(np.mean(explained))
+        return {
+            "attenuation": attenuation,
+            "chromaticity_distance": median_chromaticity_distance,
+            "scaled_residual": median_scaled_residual,
+            "explained_fraction": explained_fraction,
+            "pixel_count": valid_count,
+        }
+
+    def _is_cast_shadow(
+        self,
+        frame: np.ndarray,
+        background: Optional[np.ndarray],
+        box: Tuple[int, int, int, int],
+        selection: np.ndarray,
+    ) -> Tuple[bool, Optional[dict]]:
+        if not self.reject_cast_shadows:
+            return False, None
+        metrics = self._cast_shadow_metrics(frame, background, box, selection)
+        if metrics is None:
+            return False, None
+        is_shadow = (
+            self.shadow_min_attenuation
+            <= metrics["attenuation"]
+            <= self.shadow_max_attenuation
+            and metrics["chromaticity_distance"]
+            <= self.shadow_max_chromaticity_distance
+            and metrics["scaled_residual"] <= self.shadow_max_scaled_residual
+            and metrics["explained_fraction"] >= self.shadow_min_explained_fraction
+        )
+        return bool(is_shadow), metrics
+
+    # MOG2 learns at roughly 1/history per frame, so its background image barely
+    # moves between consecutive frames. Rebuilding it costs ~6-12 ms on a
+    # 1280x720 stream, so one snapshot is reused for a short interval. The
+    # snapshot is always taken *before* ``bg_sub.apply`` for the frame that
+    # created it, so the shadow test never compares a vehicle against a
+    # background that already contains it.
+    _background_refresh_interval = 10
+
+    def _background_reference(self, frame_idx: Optional[int] = None) -> Optional[np.ndarray]:
+        """Learned background used to explain a blob as a cast shadow."""
+        if not self.reject_cast_shadows:
+            return None
+        current_frame = self._frame_idx if frame_idx is None else frame_idx
+        age = (
+            None
+            if self._background_frame is None
+            else current_frame - self._background_frame
+        )
+        if self._background_image is not None and age is not None and (
+            0 <= age < self._background_refresh_interval
+        ):
+            return self._background_image
+        background_getter = getattr(self.bg_sub, "getBackgroundImage", None)
+        if not callable(background_getter):
+            return None
+        try:
+            self._background_image = background_getter()
+        except cv2.error:
+            self._background_image = None
+        self._background_frame = current_frame
+        return self._background_image
+
+    def _motion_crop_bounds(self, shape: Tuple[int, int]) -> Optional[Tuple[int, int, int, int]]:
+        """Crop with a halo for temporal blur, morphology and ROI context."""
+        roi = self.roi_mask
+        if roi is None or roi.shape != shape:
+            key = (None, shape, self.fast_motion, self.fast_motion_scale)
+        else:
+            key = (id(roi), shape, self.roi_context_padding_px, self.fast_motion, self.fast_motion_scale)
+        if key != self._motion_roi_key:
+            # A resized ROI requires a fresh MOG2/temporal history: the old
+            # model and its gray samples use a different coordinate system.
+            if self._motion_roi_key is not None:
+                self.bg_sub = cv2.createBackgroundSubtractorMOG2(
+                    history=700, varThreshold=32, detectShadows=True
+                )
+                self._gray_history.clear()
+                self._background_image = None
+                self._background_frame = None
+            self._motion_roi_key = key
+            self._motion_roi_bounds = None
+            if roi is not None and roi.shape == shape:
+                pixels = cv2.findNonZero(roi)
+                if pixels is not None:
+                    x, y, w, h = cv2.boundingRect(pixels)
+                    halo = max(48, self.roi_context_padding_px + 32)
+                    left, top = max(0, x - halo), max(0, y - halo)
+                    right, bottom = min(shape[1], x + w + halo), min(shape[0], y + h + halo)
+                    if (right - left) * (bottom - top) < shape[0] * shape[1]:
+                        self._motion_roi_bounds = (left, top, right, bottom)
+        return self._motion_roi_bounds
+
+    def prepare_motion_frame(
+        self,
+        frame: np.ndarray,
+        timestamp_s: Optional[float] = None,
+        frame_idx: Optional[int] = None,
+    ) -> tuple:
+        """Precompute camera-local MOG2 and temporal masks before identity updates.
+
+        Call once per input frame, in source order. Track association and ROI
+        clipping happen later on the main frame barrier.
+        """
+        # Test/integrator background implementations may return a fixed
+        # full-size mask regardless of their input image dimensions.
+        bounds = (
+            self._motion_crop_bounds(frame.shape[:2])
+            if isinstance(self.bg_sub, cv2.BackgroundSubtractorMOG2)
+            else None
+        )
+        half_scale = self.fast_motion and isinstance(self.bg_sub, cv2.BackgroundSubtractorMOG2)
+        if half_scale and bounds is None:
+            bounds = (0, 0, frame.shape[1], frame.shape[0])
+        if bounds is None:
+            working_frame = frame
+        else:
+            left, top, right, bottom = bounds
+            working_frame = frame[top:bottom, left:right]
+        if half_scale:
+            scale = float(self.fast_motion_scale)
+            working_frame = cv2.resize(
+                working_frame,
+                (max(1, round(working_frame.shape[1] * scale)), max(1, round(working_frame.shape[0] * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        background_image = self._background_reference(frame_idx=frame_idx)
+        raw_background_mask = self.bg_sub.apply(working_frame)
+        _, definite_foreground = cv2.threshold(
+            raw_background_mask, 200, 255, cv2.THRESH_BINARY
+        )
+        # MOG2 reserves value 127 for pixels it believes are cast shadows.  A
+        # dark toy car on the grey road is frequently assigned that value too,
+        # especially after the phone exposure is raised.  The previous >200
+        # threshold permanently deleted the body before our more selective
+        # _is_cast_shadow() check could inspect it.  Admit 127 only when a
+        # learned background exists and the custom shadow discriminator is
+        # enabled; temporal motion remains mandatory and real shadows are
+        # rejected contour-by-contour below.
+        if self.reject_cast_shadows and background_image is not None:
+            mog_shadow_markers = cv2.compare(
+                raw_background_mask, 127, cv2.CMP_EQ
+            )
+            background_mask = cv2.bitwise_or(
+                definite_foreground, mog_shadow_markers
+            )
+        else:
+            mog_shadow_markers = np.zeros_like(raw_background_mask)
+            background_mask = definite_foreground
+        # Keep the legacy two-argument call for normal synchronous frames,
+        # including custom/monkeypatched tracker implementations.
+        if frame_idx is None:
+            temporal_motion = self._temporal_motion_mask(working_frame, timestamp_s=timestamp_s)
+        else:
+            temporal_motion = self._temporal_motion_mask(
+                working_frame, timestamp_s=timestamp_s, frame_idx=frame_idx
+            )
+        if half_scale:
+            size = (right - left, bottom - top)
+            def expand(image, interpolation=cv2.INTER_NEAREST):
+                return None if image is None else cv2.resize(image, size, interpolation=interpolation)
+
+            background_image = expand(background_image, cv2.INTER_LINEAR)
+            mog_shadow_markers = expand(mog_shadow_markers)
+            background_mask = expand(background_mask)
+            temporal_motion = expand(temporal_motion)
+        # Motion mask là cổng bắt buộc: foreground đứng yên không được thành xe.
+        support = cv2.dilate(temporal_motion, self._motion_support_kernel, iterations=1)
+        mask = cv2.bitwise_and(background_mask, support)
+        if bounds is not None:
+            # Downstream shadow tests, track boxes and masks stay full-frame.
+            h, w = frame.shape[:2]
+            def restore(image):
+                if image is None:
+                    return None
+                output = np.zeros((h, w) + image.shape[2:], dtype=image.dtype)
+                output[top:bottom, left:right] = image
+                return output
+
+            background_image = restore(background_image)
+            mog_shadow_markers = restore(mog_shadow_markers)
+            temporal_motion = restore(temporal_motion)
+            mask = restore(mask)
+        return background_image, mog_shadow_markers, temporal_motion, mask
+
+    def _detect(
+        self,
+        frame: np.ndarray,
+        timestamp_s: Optional[float] = None,
+        priority_regions: Optional[Sequence[Any]] = None,
+        prepared_motion: Optional[tuple] = None,
+    ) -> Tuple[List[dict], np.ndarray]:
+        self._last_shadow_rejections = []
+        self._last_detection_rejections = []
+        if prepared_motion is None:
+            prepared_motion = self.prepare_motion_frame(frame, timestamp_s)
+        background_image, mog_shadow_markers, temporal_motion, mask = prepared_motion
+        if self.roi_mask is not None:
+            source_id = id(self.roi_mask)
+            if (
+                self._roi_context_mask is None
+                or self._roi_context_source_id != source_id
+                or self._roi_context_mask.shape != self.roi_mask.shape
+            ):
+                if self.roi_context_padding_px <= 0:
+                    self._roi_context_mask = self.roi_mask.copy()
+                else:
+                    size = self.roi_context_padding_px * 2 + 1
+                    kernel = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (size, size)
+                    )
+                    self._roi_context_mask = cv2.dilate(
+                        self.roi_mask, kernel, iterations=1
+                    )
+                self._roi_context_source_id = source_id
+            # Keep a bounded context band so a vehicle touching the configured
+            # ROI is measured as a whole object.  A component still needs real
+            # support inside the strict ROI below; this does not expand the
+            # area in which unrelated blobs may create identities.
+            mask = cv2.bitwise_and(mask, self._roi_context_mask)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._motion_open_kernel)
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            self._motion_join_kernel,
+            iterations=self.motion_join_iterations,
+        )
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        image_area = frame.shape[0] * frame.shape[1]
+        image_height, image_width = frame.shape[:2]
+        max_bbox_width = image_width * self.max_bbox_width_ratio
+        max_bbox_height = image_height * self.max_bbox_height_ratio
+        max_bbox_area = image_area * self.max_bbox_area_ratio
+        priority_mask = self._priority_mask(frame.shape[:2], priority_regions)
+        detections = []
+        min_possible_area = min(self.min_area, self.priority_min_area)
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            # No normal or priority-region detection can pass below these
+            # absolute limits. Reject it before allocating/filling a contour
+            # mask for strict-ROI support. Exposure changes can create
+            # hundreds of 3x3 speckles, and doing polygon work for all of them
+            # caused avoidable latency without changing any valid detection.
+            if (
+                w < self.min_width
+                or h < self.min_height
+                or (w * h) < min_possible_area
+            ):
+                continue
+            area = cv2.contourArea(contour)
+            if area < min_possible_area:
+                continue
+            box = (x, y, w, h)
+            point = (x + w // 2, y + h)
+            roi_support_pixels = None
+            roi_support_ratio = 1.0
+            roi_clipped = False
+            roi_context_rescued = False
+            roi_anchor_tolerated = False
+            contour_poly = None
+            if self.roi_mask is not None:
+                contour_poly = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillPoly(
+                    contour_poly,
+                    [contour - [x, y]],
+                    255,
+                )
+                component_pixels = max(1, cv2.countNonZero(contour_poly))
+                strict_selection = cv2.bitwise_and(
+                    contour_poly,
+                    self.roi_mask[y:y + h, x:x + w],
+                )
+                roi_support_pixels = cv2.countNonZero(strict_selection)
+                roi_support_ratio = float(roi_support_pixels) / float(
+                    component_pixels
+                )
+                roi_clipped = roi_support_ratio < 0.98
+                required_support = max(
+                    20,
+                    min(self.motion_min_pixels, int(round(0.08 * component_pixels))),
+                )
+                if roi_support_pixels < required_support:
+                    # A vehicle clipped by the ROI boundary keeps part of its
+                    # foreground only inside the bounded context band, so the
+                    # strict floor starves exactly the objects the band was
+                    # built to complete.  Re-measure support over strict ROI +
+                    # band, but only for a clipped blob that genuinely touches
+                    # the strict ROI and whose ground anchor stays inside the
+                    # wider ROI.  A blob living entirely in the band is still
+                    # outside the monitored area and keeps dying here.
+                    context_support = 0
+                    anchor_in_context = False
+                    if self._roi_context_mask is not None:
+                        context_selection = cv2.bitwise_and(
+                            contour_poly,
+                            self._roi_context_mask[
+                                y:y + h, x:x + w
+                            ],
+                        )
+                        context_support = cv2.countNonZero(context_selection)
+                        anchor_x, anchor_y = point
+                        anchor_in_context = (
+                            0 <= anchor_x < self._roi_context_mask.shape[1]
+                            and 0 <= anchor_y < self._roi_context_mask.shape[0]
+                            and self._roi_context_mask[anchor_y, anchor_x] != 0
+                        )
+                    if not (
+                        roi_clipped
+                        and roi_support_pixels > 0
+                        and anchor_in_context
+                        and context_support >= required_support
+                    ):
+                        self._last_detection_rejections.append({
+                            "type": "insufficient_strict_roi_support",
+                            "box": tuple(int(value) for value in box),
+                            "roi_support_pixels": int(roi_support_pixels),
+                            "roi_support_ratio": round(roi_support_ratio, 4),
+                        })
+                        self._roi_rejected_points.append(
+                            point
+                        )
+                        continue
+                    roi_context_rescued = True
+            group = (self.occlusion_guard.covering_group(box, self._tracks, self._predictions)
+                     if self.enable_occlusion_guard else None)
+            if group is not None:
+                # Check group ownership before size/appearance filters can
+                # delete the only evidence of two occluded cars.
+                regions = (self.occlusion_guard.partition(frame, mask, box, self._tracks,
+                                                         self._predictions, group)
+                           if self.enable_watershed else [])
+                if not regions:
+                    self.occlusion_guard.activate(group, self._tracks)
+                    detections.append({'box': box, 'point': point,
+                        'area': area, 'bbox_area': box[2]*box[3], 'hist': None,
+                        'ambiguous_merged': True, 'occlusion_members': group.members,
+                        'observation_kind': 'merged', 'priority': False,
+                        'roi_clipped': bool(roi_clipped),
+                        'roi_support_ratio': float(roi_support_ratio),
+                        'roi_context_rescued': bool(roi_context_rescued),
+                        'roi_anchor_tolerated': bool(roi_anchor_tolerated)})
+                else:
+                    x0, y0, _, _ = box
+                    for tid, child, selection in regions:
+                        selected = np.zeros(mask.shape, np.uint8)
+                        selected[y0:y0+selection.shape[0], x0:x0+selection.shape[1]] = selection
+                        detections.append({'box': child, 'point': self._bottom_center(child),
+                            'area': cv2.countNonZero(selection), 'bbox_area': child[2]*child[3],
+                            'hist': self._histogram(frame, child, selected), 'priority': False,
+                            'observation_kind': 'watershed_provisional',
+                            'occlusion_members': group.members, 'ambiguous_merged': False,
+                            'roi_clipped': bool(roi_clipped),
+                            'roi_support_ratio': float(roi_support_ratio),
+                            'roi_context_rescued': bool(roi_context_rescued),
+                            'roi_anchor_tolerated': bool(roi_anchor_tolerated)})
+                continue
+            if area > image_area * 0.22:
+                continue
+            bbox_area = float(w * h)
+            if (
+                w > max_bbox_width
+                or h > max_bbox_height
+                or bbox_area > max_bbox_area
+            ):
+                self._last_detection_rejections.append({
+                    "type": "oversized_bbox",
+                    "box": (int(x), int(y), int(w), int(h)),
+                    "max_width": round(float(max_bbox_width), 1),
+                    "max_height": round(float(max_bbox_height), 1),
+                    "max_area": round(float(max_bbox_area), 1),
+                })
+                cv2.drawContours(mask, [contour], -1, 0, thickness=cv2.FILLED)
+                continue
+            aspect_ratio = w / max(h, 1)
+            if aspect_ratio < 0.25 or aspect_ratio > 5.0:
+                continue
+            # A component may extend into the bounded context band, but it was
+            # admitted only after strict-ROI support was measured above.
+            if self.roi_mask is not None:
+                px, py = point
+                anchor_rejected = False
+                if (
+                    px < 0
+                    or py < 0
+                    or py >= self.roi_mask.shape[0]
+                    or px >= self.roi_mask.shape[1]
+                ):
+                    anchor_rejected = True
+                elif self.roi_mask[py, px] == 0 and not roi_clipped:
+                    # A boundary-clipped blob can keep >=98% of its measured
+                    # pixels inside the strict ROI (not ``roi_clipped``) while
+                    # its ground anchor slips a few px past the edge — the
+                    # case that starved ROI-edge fragments of detections.
+                    # Tolerate the miss only inside the bounded context band;
+                    # anything further stays a real out-of-ROI rejection.
+                    context = self._roi_context_mask
+                    if context is not None and context[py, px] != 0:
+                        roi_anchor_tolerated = True
+                    else:
+                        anchor_rejected = True
+                if anchor_rejected:
+                    self._last_detection_rejections.append({
+                        "type": "anchor_outside_roi",
+                        "box": (int(x), int(y), int(w), int(h)),
+                        "anchor": (int(px), int(py)),
+                    })
+                    self._roi_rejected_points.append(point)
+                    cv2.drawContours(mask, [contour], -1, 0, thickness=cv2.FILLED)
+                    continue
+            is_priority = self._box_is_priority(priority_mask, box, point)
+            min_area = self.priority_min_area if is_priority else self.min_area
+            if area < min_area:
+                continue
+            motion_pixels = cv2.countNonZero(temporal_motion[y:y + h, x:x + w])
+            min_pixels = self.priority_motion_min_pixels if is_priority else self.motion_min_pixels
+            min_ratio = self.priority_motion_min_ratio if is_priority else self.motion_min_ratio
+            if motion_pixels < min_pixels or motion_pixels / float(w * h) < min_ratio:
+                continue
+            if contour_poly is None:
+                contour_poly = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillPoly(
+                    contour_poly,
+                    [contour - [x, y]],
+                    255,
+                )
+            contour_selection = cv2.bitwise_and(
+                contour_poly,
+                mask[y:y + h, x:x + w],
+            )
+            shadow_marker_pixels = cv2.countNonZero(
+                cv2.bitwise_and(
+                    contour_selection,
+                    mog_shadow_markers[y:y + h, x:x + w],
+                )
+            )
+            component_pixels = max(1, cv2.countNonZero(contour_selection))
+            shadow_marker_ratio = float(shadow_marker_pixels) / float(
+                component_pixels
+            )
+            dark_foreground_rescued = bool(
+                shadow_marker_pixels >= 20 and shadow_marker_ratio >= 0.08
+            )
+            if self.reject_cast_shadows:
+                is_shadow, shadow_metrics = self._is_cast_shadow(
+                    frame,
+                    background_image,
+                    box,
+                    contour_selection,
+                )
+                if is_shadow:
+                    self._last_shadow_rejections.append({
+                        "box": box,
+                        "priority": bool(is_priority),
+                        "mog_shadow_marker_ratio": round(
+                            shadow_marker_ratio, 4
+                        ),
+                        **(shadow_metrics or {}),
+                    })
+                    cv2.drawContours(mask, [contour], -1, 0, thickness=cv2.FILLED)
+                    continue
+            # Priority 8: Quality filter - skip low-quality detections
+            histogram = self._histogram(frame, box, mask=mask)
+            detections.append({
+                "box": box,
+                "point": point,
+                "area": area,
+                "bbox_area": bbox_area,
+                "motion_fill_ratio": float(motion_pixels) / float(max(1, w * h)),
+                "hist": histogram,
+                "priority": is_priority,
+                "ambiguous_merged": False,
+                "appearance_trusted": histogram is not None,
+                "observation_kind": "detection",
+                "roi_clipped": bool(roi_clipped),
+                "roi_support_pixels": int(roi_support_pixels or 0),
+                "roi_support_ratio": float(roi_support_ratio),
+                "roi_context_rescued": bool(roi_context_rescued),
+                "roi_anchor_tolerated": bool(roi_anchor_tolerated),
+                "dark_foreground_rescued": dark_foreground_rescued,
+                "mog_shadow_marker_ratio": shadow_marker_ratio,
+                "spatial_appearance": spatial_histograms(frame, box, mask) if self.enable_spatial_appearance else None,
+            })
+        return self._suppress_duplicate_detections(detections), mask
+
+    def _same_motion_echo(self, first: dict, second: dict) -> bool:
+        """Detect two foreground blobs produced by one fast-moving vehicle.
+
+        Frame differencing contains both the old and current silhouette of a
+        fast car.  They have near-identical appearance/size and either overlap
+        or almost touch, unlike two independent parked cars.
+        """
+        if first.get('hist') is None or second.get('hist') is None:
+            return False
+        if first.get('occlusion_members') or second.get('occlusion_members'):
+            return False
+        first_box, second_box = first["box"], second["box"]
+        first_w, first_h = first_box[2], first_box[3]
+        second_w, second_h = second_box[2], second_box[3]
+        size_ratio = min(first_w * first_h, second_w * second_h) / max(first_w * first_h, second_w * second_h, 1)
+        if size_ratio < 0.45:
+            return False
+        appearance = cv2.compareHist(first["hist"], second["hist"], cv2.HISTCMP_BHATTACHARYYA)
+        if appearance > 0.22:
+            return False
+        p1, p2 = first["point"], second["point"]
+        distance = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+        allowed_distance = max(24.0, 1.10 * max(min(first_w, first_h), min(second_w, second_h)))
+        return distance <= allowed_distance and self._box_gap(first_box, second_box) <= 14.0
+
+    def _suppress_duplicate_detections(self, detections: List[dict]) -> List[dict]:
+        """Remove only near-identical blobs; defer uncertain echoes to assignment.
+
+        Two real cars may touch in image space.  The former broad suppression
+        discarded one of them before track predictions were available.
+        """
+        if len(detections) < 2:
+            return detections
+        kept = []
+        for detection in sorted(detections, key=lambda item: item["area"], reverse=True):
+            if any(
+                self._iou(detection["box"], existing["box"]) >= 0.25
+                and not self._different_clean_owners(detection, existing)
+                and self._same_motion_echo(detection, existing)
+                and cv2.compareHist(
+                    detection["hist"], existing["hist"], cv2.HISTCMP_BHATTACHARYYA
+                ) <= 0.12
+                for existing in kept
+            ):
+                continue
+            kept.append(detection)
+        return kept
+
+    def _different_clean_owners(self, first, second):
+        if not self.enable_occlusion_guard:
+            return False
+        def owners(item):
+            x, y, w, h = item['box']
+            return {tid for tid, track in self._tracks.items()
+                    if len(getattr(track, 'clean_observations', [])) >= 3
+                    and x <= track.cx <= x+w and y <= track.cy-track.h/2 <= y+h}
+        left, right = owners(first), owners(second)
+        return bool(left and right and left.isdisjoint(right))
+
+    def _is_echo_of_matched_track(self, detection: dict, track: TrackedVehicle) -> bool:
+        """Reject a new detection that is the trailing silhouette of a track."""
+        if len(track.history) < 4:
+            return False
+        older_point = track.history[-4]
+        if np.linalg.norm(np.subtract(detection["point"], older_point)) > max(22.0, 0.70 * max(track.w, track.h)):
+            return False
+        reference = {
+            "box": track.bbox,
+            "point": (track.cx, track.cy),
+            "hist": track.appearance,
+            "area": track.area,
+        }
+        return self._same_motion_echo(detection, reference)
+
+    def _predicted_box(self, track: TrackedVehicle, point: Tuple[int, int]) -> Tuple[int, int, int, int]:
+        return point[0] - track.w // 2, point[1] - track.h, track.w, track.h
+
+    @staticmethod
+    def _assignment_has_margin(
+        costs: np.ndarray,
+        row: int,
+        col: int,
+        margin: float,
+        invalid_cost: float = 10.0,
+    ) -> bool:
+        """Return whether one assignment clearly beats every competitor.
+
+        Competitors that the global solution already gave to another track are
+        deliberately still counted: when two lineages are tied for two
+        interchangeable detections, LAPJV's choice between them is arbitrary,
+        and that tie is exactly the ID switch this check exists to catch.
+        """
+        selected = float(costs[row, col])
+        alternatives = [
+            float(value)
+            for index, value in enumerate(costs[row])
+            if index != col and value < invalid_cost
+        ]
+        alternatives.extend(
+            float(costs[index, col])
+            for index in range(costs.shape[0])
+            if index != row and costs[index, col] < invalid_cost
+        )
+        return not alternatives or min(alternatives) - selected >= margin
+
+    def _association_gate(
+        self,
+        track: TrackedVehicle,
+        invisible: int,
+        ceiling: float,
+    ) -> float:
+        """Largest prediction-to-detection distance this track may claim.
+
+        ``max_distance`` alone is a whole-scene constant: on a top-down model
+        lot it spans more than a vehicle length, so a coasting track could
+        claim the neighbouring car's blob. What the motion model can actually
+        justify is the distance the vehicle could have travelled since its last
+        measurement, plus a margin for its own size, and that is what gates
+        here. ``ceiling`` still applies, for a car that accelerates faster than
+        its filtered velocity suggests.
+
+        The gate fails open while the motion model is uninformed: a fragment
+        with only one or two corrections still carries the Kalman filter's
+        initial zero velocity, so a budget derived from it would reject the
+        vehicle's real displacement.
+        """
+        if (
+            invisible > 0
+            and self._prediction_age_seconds(track)
+            > self._prediction_age_limit_seconds(track)
+        ):
+            return 0.0
+        if int(getattr(track, "total_visible_count", 0)) < self.velocity_gate_min_observations:
+            return float(ceiling)
+        velocity_x, velocity_y = self._track_velocity_px_per_frame(track)
+        speed = float(np.hypot(velocity_x, velocity_y))
+        extent = float(max(track.w, track.h))
+        dt = max(1, self._source_dt)
+        if dt > 1:
+            ceiling *= dt
+        budget = (
+            speed * (invisible + dt) * self.velocity_gate_scale
+            + self.velocity_gate_size_ratio * extent
+        )
+        floor = max(24.0, self.velocity_gate_size_ratio * extent)
+        return float(min(ceiling, max(floor, budget)))
+
+    @staticmethod
+    def _track_velocity_px_per_frame(track: TrackedVehicle) -> Tuple[float, float]:
+        """Per-frame image velocity, from the Kalman state or the trail."""
+        kalman = getattr(track, "kalman", None)
+        state = getattr(kalman, "statePost", None) if kalman is not None else None
+        if state is not None and state.shape[0] >= 4:
+            return float(state[2, 0]), float(state[3, 0])
+        history = list(getattr(track, "history", ()) or ())
+        if len(history) >= 2:
+            steps = min(4, len(history) - 1)
+            first, last = history[-1 - steps], history[-1]
+            source_frames = getattr(track, "history_source_frames", ())
+            if len(source_frames) == len(history):
+                steps = max(1, int(source_frames[-1]) - int(source_frames[-1 - steps]))
+            return (last[0] - first[0]) / steps, (last[1] - first[1]) / steps
+        return 0.0, 0.0
+
+    def _elongation_explained_by_motion(
+        self,
+        track: TrackedVehicle,
+        box: Tuple[int, int, int, int],
+    ) -> bool:
+        """Is this blob one moving vehicle rather than two merged ones?
+
+        Frame differencing keeps both the previous and the current silhouette
+        of a moving vehicle, so a single car produces a contour stretched along
+        its own direction of travel by roughly ``velocity x reference age``.
+        The lower the effective frame rate, the larger that stretch: at ~7 FPS
+        it routinely reaches two to three times the vehicle's own area, which
+        the plain size ratio cannot tell apart from two cars side by side.
+        Motion direction can: a real merge grows the contour across the
+        direction of travel as well, a motion trail does not.
+        """
+        _x, _y, width, height = box
+        excess_width = float(width) - float(track.w)
+        excess_height = float(height) - float(track.h)
+        if excess_width <= 0.0 and excess_height <= 0.0:
+            return True
+        velocity_x, velocity_y = self._track_velocity_px_per_frame(track)
+        span = self.motion_trail_elongation_frames * max(1, self._source_dt)
+        # Perspective and mask noise vary the silhouette by a fraction of the
+        # vehicle even when it moves along one axis only.
+        tolerance_width = 0.30 * float(track.w)
+        tolerance_height = 0.30 * float(track.h)
+        return (
+            excess_width <= abs(velocity_x) * span + tolerance_width
+            and excess_height <= abs(velocity_y) * span + tolerance_height
+        )
+
+    def _lineage_score(self, track) -> float:
+        """Calculate lineage score based on track history and reliability.
+
+        Priority 5: Use track lineage to adjust split assignment margin.
+        New/unreliable tracks require higher margin to prevent ID switches.
+
+        Returns value between 0 (new/unreliable) and 1 (established/reliable).
+        """
+        # History length score (longer history = more reliable)
+        history_score = min(1.0, len(getattr(track, 'history', [])) / 10.0)
+
+        # Visible count score (more observations = more reliable)
+        visible_count = getattr(track, 'total_visible_count', 0)
+        visible_score = min(1.0, float(visible_count) / 10.0)
+
+        # Fragment visible count score
+        fragment_count = getattr(track, 'fragment_visible_count', 0)
+        fragment_score = min(1.0, float(fragment_count) / 5.0)
+
+        # Age score (frames since creation)
+        age = getattr(track, 'age', 0)
+        age_score = min(1.0, float(age) / 15.0)
+
+        # Average of all scores
+        return (history_score + visible_score + fragment_score + age_score) / 4.0
+
+    def _has_recent_merged_freeze(self, track: TrackedVehicle) -> bool:
+        # Competition freezes and explicit two-car occlusions use the same
+        # timestamp fields, but only the latter earns the longer merged
+        # reacquire corridor.  Without this discriminator a normal close
+        # competition could keep stale Kalman motion alive for several seconds.
+        if getattr(track, "last_ambiguous_kind", None) != "merged":
+            return False
+        timestamp = getattr(track, "last_ambiguous_timestamp_s", None)
+        if (
+            timestamp is not None
+            and self._current_timestamp_s is not None
+        ):
+            return (
+                0.0
+                <= self._current_timestamp_s - float(timestamp)
+                <= self.merged_reacquire_max_seconds
+            )
+        source_frame = getattr(track, "last_ambiguous_source_frame", None)
+        if source_frame is not None:
+            return (
+                0 <= self._source_frame_idx - int(source_frame)
+                <= int(round(self.merged_reacquire_max_seconds * 30.0))
+            )
+        frame = getattr(track, "last_ambiguous_frame", None)
+        if frame is None:
+            return False
+        # Timestamp-less callers are mostly unit tests/legacy video paths.
+        # A conservative 30 FPS conversion keeps the protection bounded.
+        return (
+            0 <= self._frame_idx - int(frame)
+            <= int(round(self.merged_reacquire_max_seconds * 30.0))
+        )
+
+    def _mark_competing_assignments(
+        self,
+        costs: np.ndarray,
+        track_ids: Sequence[int],
+        predictions: Dict[int, Tuple[int, int]],
+        detections: List[dict],
+    ) -> None:
+        """Freeze a detection when two lineages can claim it almost equally.
+
+        LAPJV is deterministic, but its deterministic tie-break is not
+        physical evidence.  In particular, a stationary car and a nearby
+        reversing car can produce a single foreground blob on the old
+        stationary trajectory.  Marking that column ambiguous prevents the
+        selected row from poisoning the other track's identity or appearance.
+        """
+        if not track_ids or not detections:
+            return
+        viable_limit = min(self.assignment_cost_limit, 0.95)
+        for col, detection in enumerate(detections):
+            if detection.get("ambiguous_merged"):
+                continue
+            viable_rows = [
+                row
+                for row in range(len(track_ids))
+                if float(costs[row, col]) < viable_limit
+            ]
+            if len(viable_rows) < 2:
+                continue
+            # If there are separate detections for the competing tracks, the
+            # one-to-one solver has real evidence to use.  Freeze only the
+            # genuinely under-observed case: one merged/ambiguous blob that
+            # could belong to two lineages.  Freezing every close pair would
+            # break ordinary crossings where both cars remain separately
+            # detected.
+            viable_columns = [
+                candidate_col
+                for candidate_col in range(len(detections))
+                if any(
+                    float(costs[row, candidate_col]) < viable_limit
+                    for row in viable_rows
+                )
+            ]
+            if len(viable_columns) > 1:
+                continue
+            viable_rows.sort(key=lambda row: float(costs[row, col]))
+            first_row, second_row = viable_rows[:2]
+            cost_gap = float(costs[second_row, col] - costs[first_row, col])
+            first_track = self._tracks[track_ids[first_row]]
+            second_track = self._tracks[track_ids[second_row]]
+            first_point = np.asarray(predictions[track_ids[first_row]], dtype=float)
+            second_point = np.asarray(predictions[track_ids[second_row]], dtype=float)
+            prediction_gap = float(np.linalg.norm(first_point - second_point))
+            diagonal = max(
+                1.0,
+                float(
+                    max(
+                        np.hypot(first_track.w, first_track.h),
+                        np.hypot(second_track.w, second_track.h),
+                    )
+                ),
+            )
+            close_predictions = prediction_gap <= 1.10 * diagonal
+            if cost_gap >= self.association_ambiguity_margin and not close_predictions:
+                continue
+            independent = any(
+                self._tracks_proven_independent(
+                    self._tracks[track_ids[left_row]],
+                    self._tracks[track_ids[right_row]],
+                )
+                for left_index, left_row in enumerate(viable_rows)
+                for right_row in viable_rows[left_index + 1:]
+            )
+            if not independent:
+                # These rows are overlapping fragments of one not-yet-proven
+                # object, not two cars competing for one measurement. Keep the
+                # strongest/oldest lineage and stop the newer fragment from
+                # forcing both tracks into frozen_ambiguous.
+                preferred_row = max(
+                    viable_rows,
+                    key=lambda row: (
+                        int(getattr(
+                            self._tracks[track_ids[row]],
+                            "total_visible_count",
+                            0,
+                        )),
+                        self._lineage_score(self._tracks[track_ids[row]]),
+                        -int(getattr(
+                            self._tracks[track_ids[row]],
+                            "first_observation_frame",
+                            self._frame_idx,
+                        )),
+                    ),
+                )
+                suppressed = []
+                for row in viable_rows:
+                    if row == preferred_row:
+                        continue
+                    costs[row, col] = 10.0
+                    suppressed.append(int(track_ids[row]))
+                self._last_association_events.append({
+                    "type": "duplicate_lineage_competition_resolved",
+                    "detection_id": int(col),
+                    "kept_local_track_id": int(track_ids[preferred_row]),
+                    "suppressed_local_track_ids": suppressed,
+                    "reason": "no_concurrent_distinct_measurements",
+                })
+                continue
+            selected_cost = float(costs[first_row, col])
+            detection["ambiguous_assignment"] = True
+            self._ambiguous_detection_ids.add(col)
+            self._viable_pairs.update(
+                (track_ids[row], col) for row in viable_rows
+            )
+            for row in viable_rows:
+                track = self._tracks[track_ids[row]]
+                track.last_ambiguous_frame = int(self._frame_idx)
+                track.last_ambiguous_source_frame = int(self._source_frame_idx)
+                track.last_ambiguous_timestamp_s = self._current_timestamp_s
+                track.last_ambiguous_kind = "competition"
+            costs[:, col] = 10.0
+            self._last_association_events.append({
+                "type": "association_deferred_competing_tracks",
+                "detection_id": int(col),
+                "local_track_ids": [int(track_ids[row]) for row in viable_rows],
+                "selected_cost": round(selected_cost, 4),
+                "cost_gap": round(float(cost_gap), 4),
+                "prediction_gap": round(float(prediction_gap), 2),
+                "prediction_source": [
+                    str(
+                        getattr(
+                            self._tracks[track_ids[row]],
+                            "prediction_source",
+                            "unknown",
+                        )
+                    )
+                    for row in viable_rows
+                ],
+            })
+            # Keep the legacy telemetry name for a merged contour that is
+            # deferred during a split.  Consumers and older tests use this
+            # event to distinguish a normal competition from a post-merge
+            # recovery delay.
+            if any(
+                self._has_recent_merged_freeze(self._tracks[track_ids[row]])
+                for row in viable_rows
+            ):
+                self._last_association_events.append({
+                    "type": "split_assignment_deferred",
+                    "local_track_ids": [
+                        int(track_ids[row]) for row in viable_rows
+                    ],
+                    "detection_id": int(col),
+                    "reason": "competing_single_detection",
+                })
+
+    # Two live tracks may sit on one ROI-clipped vehicle: a starved fragment
+    # rebounds as a second local ID whose bbox is nearly identical to the
+    # first.  At ~0.9 IoU on the same clipped edge they are one physical car.
+    _ROI_EDGE_TWIN_IOU = 0.90
+    _ROI_EDGE_TWIN_CENTER_PX = 12.0
+
+    @staticmethod
+    def _roi_edge_twin_strength(track: TrackedVehicle) -> Tuple:
+        """Keep the stronger twin: confirmed, then older, then most-seen."""
+        return (
+            1 if track.status == TrackStatus.CONFIRMED else 0,
+            -int(getattr(track, "first_observation_frame", track.entered_frame)),
+            int(getattr(track, "total_visible_count", 0)),
+            -int(track.track_id),
+        )
+
+    def _suppress_roi_edge_twins(self) -> set:
+        """Mark near-duplicate lineages rooted at one ROI-clipped object.
+
+        Suppressed tracks stay in ``self._tracks`` and age normally, but they
+        are barred from claiming detections or feeding merged/competition
+        heuristics as if they were a second physical car, so they can never
+        spawn a competing Global ID.  Any pair already managed by
+        OcclusionGuard is left alone.
+        """
+        suppressed: set[int] = set()
+        tracks = list(self._tracks.values())
+        grouped: set[int] = set()
+        if self.enable_occlusion_guard:
+            for group in self.occlusion_guard.groups.values():
+                grouped.update(group.members)
+        twins: List[Tuple[int, int]] = []
+        if self.roi_mask is not None and len(tracks) >= 2:
+            for index, left in enumerate(tracks):
+                if left.track_id in grouped:
+                    continue
+                for right in tracks[index + 1:]:
+                    if right.track_id in grouped:
+                        continue
+                    if not (
+                        getattr(left, "roi_clipped", False)
+                        and getattr(right, "roi_clipped", False)
+                    ):
+                        continue
+                    if not (
+                        left.status == TrackStatus.TENTATIVE
+                        or right.status == TrackStatus.TENTATIVE
+                        or int(left.consecutive_invisible_count) > 0
+                        or int(right.consecutive_invisible_count) > 0
+                    ):
+                        continue
+                    if (
+                        self._iou(left.bbox, right.bbox)
+                        < self._ROI_EDGE_TWIN_IOU
+                    ):
+                        continue
+                    left_center = np.asarray(
+                        [left.x + left.w / 2.0, left.y + left.h / 2.0]
+                    )
+                    right_center = np.asarray(
+                        [right.x + right.w / 2.0, right.y + right.h / 2.0]
+                    )
+                    center_gap = float(
+                        np.linalg.norm(left_center - right_center)
+                    )
+                    extent = max(
+                        1.0,
+                        min(
+                            np.hypot(left.w, left.h),
+                            np.hypot(right.w, right.h),
+                        ),
+                    )
+                    if center_gap > max(
+                        self._ROI_EDGE_TWIN_CENTER_PX, 0.15 * extent
+                    ):
+                        continue
+                    twins.append((left.track_id, right.track_id))
+        # A chain of pairwise twins is still one physical object, so suppress
+        # whole connected components rather than one side of each pair.
+        parent = {track.track_id: track.track_id for track in tracks}
+
+        def find(track_id: int) -> int:
+            while parent[track_id] != track_id:
+                parent[track_id] = parent[parent[track_id]]
+                track_id = parent[track_id]
+            return track_id
+
+        for left_id, right_id in twins:
+            left_root, right_root = find(left_id), find(right_id)
+            if left_root != right_root:
+                parent[max(left_root, right_root)] = min(left_root, right_root)
+        components: Dict[int, List[TrackedVehicle]] = {}
+        for track in tracks:
+            components.setdefault(find(track.track_id), []).append(track)
+        for members in components.values():
+            if len(members) < 2:
+                continue
+            members.sort(key=self._roi_edge_twin_strength, reverse=True)
+            keeper = members[0]
+            for twin in members[1:]:
+                suppressed.add(twin.track_id)
+                self._last_association_events.append({
+                    "type": "roi_edge_twin_suppressed",
+                    "kept_local_track_id": int(keeper.track_id),
+                    "suppressed_local_track_id": int(twin.track_id),
+                    "iou": round(self._iou(keeper.bbox, twin.bbox), 4),
+                    "reason": "near_identical_clipped_bboxes",
+                })
+        for track in tracks:
+            track.roi_edge_twin_suppressed = track.track_id in suppressed
+        return suppressed
+
+    def _assign(self, detections: List[dict]) -> Tuple[List[Tuple[int, int, Tuple[int, int]]], List[int], List[int]]:
+        track_ids = list(self._tracks)
+        predictions = dict(self._predict_tracks())
+        if self.enable_occlusion_guard:
+            for group in self.occlusion_guard.groups.values():
+                if group.active:
+                    for tid in group.members:
+                        center = self.occlusion_guard.center(self._tracks[tid], predictions, group.references[tid])
+                        predictions[tid] = tuple(np.rint(center + [0, group.references[tid][1]/2]).astype(int))
+        self._ambiguous_detection_ids = set()
+        self._viable_pairs = set()
+        self._pair_metrics = {}
+        self._suppressed_roi_edge_twin_ids = self._suppress_roi_edge_twins()
+        if self.enable_occlusion_guard:
+            self.occlusion_guard.annotate(detections, self._tracks, predictions)
+        if not track_ids or not detections:
+            return [], track_ids, list(range(len(detections)))
+
+        costs = np.full((len(track_ids), len(detections)), 10.0, dtype=np.float64)
+        reacquire_eligible_track_ids: set[int] = set()
+        split_margin_track_ids: set[int] = set()
+        for row, track_id in enumerate(track_ids):
+            if track_id in self._suppressed_roi_edge_twin_ids:
+                # Suppressed ROI-edge twins stay in the track list and age
+                # normally, but they must not claim a detection or count as a
+                # second physical car anywhere downstream of this row.
+                continue
+            track = self._tracks[track_id]
+            predicted_point = predictions[track_id]
+            predicted_box = self._predicted_box(track, predicted_point)
+            stale_anchor_reacquire = False
+            invisible = int(track.consecutive_invisible_count)
+            last_seen_timestamp = getattr(track, "last_seen_timestamp_s", None)
+            lost_seconds = None
+            if (
+                invisible > 0
+                and self._current_timestamp_s is not None
+                and last_seen_timestamp is not None
+            ):
+                lost_seconds = max(0.0, self._current_timestamp_s - last_seen_timestamp)
+                reacquire_window = (
+                    self.merged_reacquire_max_seconds
+                    if self._has_recent_merged_freeze(track)
+                    else self.reacquire_max_seconds
+                )
+                if lost_seconds > reacquire_window:
+                    self._last_association_events.append({
+                        "type": "association_rejected_stale_track",
+                        "local_track_id": int(track_id),
+                        "lost_seconds": round(lost_seconds, 3),
+                        "reacquire_window_seconds": round(
+                            reacquire_window, 3
+                        ),
+                    })
+                    continue
+            prediction_age = self._prediction_age_seconds(track)
+            prediction_limit = self._prediction_age_limit_seconds(track)
+            if invisible > 0 and prediction_age > prediction_limit:
+                # Stop extrapolating stale velocity, but keep the documented
+                # reacquire window usable through the last real measurement.
+                # Hard appearance/size gates below prevent this stationary
+                # anchor from following a neighbouring vehicle.
+                measured = getattr(track, "last_measured_center", None)
+                if measured is None:
+                    continue
+                predicted_point = (
+                    int(round(float(measured[0]))),
+                    int(round(float(measured[1]))),
+                )
+                predicted_box = self._predicted_box(track, predicted_point)
+                stale_anchor_reacquire = True
+                self._last_association_events.append({
+                    "type": "track_frozen_stationary",
+                    "local_track_id": int(track_id),
+                    "reason": "kalman_prediction_age_exceeded",
+                    "prediction_age_s": round(float(prediction_age), 3),
+                })
+                self._last_association_events.append({
+                    "type": "stale_prediction_replaced_by_measurement_anchor",
+                    "local_track_id": int(track_id),
+                    "prediction_age_s": round(float(prediction_age), 3),
+                    "prediction_age_limit_s": round(
+                        float(prediction_limit), 3
+                    ),
+                    "prediction_source": str(
+                        getattr(track, "prediction_source", "unknown")
+                    ),
+                })
+            if invisible > 0 or self._has_recent_merged_freeze(track):
+                split_margin_track_ids.add(track_id)
+            reacquire_eligible_track_ids.add(track_id)
+            # The gate decides which pairs are admissible; the cost is still
+            # normalised by the scene-wide ceiling so that costs stay
+            # comparable across tracks with different motion budgets.
+            max_distance = self.max_distance * min(
+                self.prediction_max_distance_scale,
+                1.0 + min(invisible, 15) / 60.0,
+            )
+            if self._source_dt > 1:
+                max_distance *= self._source_dt
+            gate_distance = self._association_gate(track, invisible, max_distance)
+            if stale_anchor_reacquire:
+                clean_w, clean_h = self._clean_size(track)
+                # _association_gate intentionally returns zero for stale
+                # extrapolation. This separate measured-position gate must
+                # not inherit that zero budget.
+                gate_distance = min(max_distance, max(3.0, 0.30 * np.hypot(clean_w, clean_h)))
+                predictions[track_id] = predicted_point
+            for col, detection in enumerate(detections):
+                if detection.get('ambiguous_merged'):
+                    continue
+                distance = float(np.linalg.norm(np.subtract(predicted_point, detection["point"])))
+                if distance > gate_distance:
+                    if stale_anchor_reacquire:
+                        self._last_association_events.append({
+                            "type": "association_rejected_stale_prediction",
+                            "local_track_id": int(track_id),
+                            "reason": "outside_last_measurement_anchor",
+                            "prediction_age_s": round(float(prediction_age), 3),
+                        })
+                    continue
+                if self._source_dt > 1 and not stale_anchor_reacquire:
+                    # A widened dt gate must not allow a similarly coloured
+                    # vehicle to jump behind a well-established trajectory.
+                    vx, vy = self._track_velocity_px_per_frame(track)
+                    speed = float(np.hypot(vx, vy))
+                    dx = float(detection["point"][0] - track.cx)
+                    dy = float(detection["point"][1] - track.cy)
+                    displacement = float(np.hypot(dx, dy))
+                    if (
+                        int(getattr(track, "total_visible_count", 0)) >= 3
+                        and speed >= 1.0
+                        and displacement > max(16.0, 0.6 * max(track.w, track.h))
+                        and (vx * dx + vy * dy) / max(1e-6, speed * displacement) < -0.35
+                    ):
+                        continue
+                iou = self._iou(predicted_box, detection["box"])
+                current_appearance_distance = (
+                    histogram_distance(track.appearance, detection["hist"])
+                    if track.appearance is not None and detection.get('hist') is not None
+                    else 0.25
+                )
+                appearance_distance = min(
+                    current_appearance_distance,
+                    compare_tracklets(track, detection["hist"]).distance,
+                ) if detection.get('hist') is not None else 0.5
+                if invisible > 0 and detection.get('hist') is None:
+                    continue
+                zone_distance = spatial_distance(getattr(track, 'spatial_appearance', None),
+                                                 detection.get('spatial_appearance'))
+                if zone_distance is not None and self.enable_spatial_appearance:
+                    appearance_distance = .70 * appearance_distance + .30 * zone_distance
+                if invisible > 0 and appearance_distance > self.lost_appearance_threshold:
+                    continue
+                if stale_anchor_reacquire and appearance_distance > min(
+                    self.lost_appearance_threshold, 0.22
+                ):
+                    continue
+                clean_w, clean_h = self._clean_size(track)
+                track_area = max(1.0, clean_w * clean_h)
+                detection_area = max(
+                    1.0,
+                    float(
+                        detection.get(
+                            "bbox_area",
+                            detection["box"][2] * detection["box"][3],
+                        )
+                    ),
+                )
+                area_ratio = detection_area / track_area
+                if not (
+                    self.min_reacquire_area_ratio
+                    <= area_ratio
+                    <= self.max_reacquire_area_ratio
+                ):
+                    continue
+                size_error = min(
+                    1.0,
+                    abs(float(np.log(max(area_ratio, 1e-6))))
+                    / abs(float(np.log(self.max_reacquire_area_ratio))),
+                )
+                cost = (
+                    0.45 * (distance / max_distance)
+                    + 0.25 * (1.0 - iou)
+                    + 0.20 * appearance_distance
+                    + 0.10 * size_error
+                )
+                costs[row, col] = cost
+                self._viable_pairs.add((track_id, col))
+                self._pair_metrics[(track_id, col)] = {
+                    "position": round(distance / max_distance, 4),
+                    "iou": round(1.0 - iou, 4),
+                    "appearance": round(float(appearance_distance), 4),
+                    "size": round(size_error, 4),
+                    "total": round(float(cost), 4),
+                    "lost_seconds": round(float(lost_seconds or 0.0), 3),
+                    "association_source": (
+                        "last_measurement_anchor"
+                        if stale_anchor_reacquire
+                        else "kalman_prediction"
+                    ),
+                }
+
+        # Resolve competition before LAPJV: a one-to-one optimizer cannot
+        # distinguish two equally plausible lineages on its own.
+        self._mark_competing_assignments(
+            costs, track_ids, predictions, detections
+        )
+
+        # One large contour that covers nearby cars is not a valid measurement.
+        # Usually it encloses two predicted tracks; it can also enclose one
+        # live track while the second car is still tentative/LOST.  In both
+        # cases, coast rather than stretching one track over both cars.
+        for col, detection in enumerate(detections):
+            if detection.get('ambiguous_merged') or detection.get(
+                'ambiguous_assignment'
+            ):
+                self._ambiguous_detection_ids.add(col)
+                for tid in detection.get('occlusion_members', ()):
+                    self._viable_pairs.add((tid, col))
+                    if tid in self._tracks:
+                        # OcclusionGuard marks this as an explicit merged
+                        # interval, so retain the longer reacquire corridor
+                        # for the two clean lineages.  Generic competition
+                        # must still use the short stale-prediction limit.
+                        self._tracks[tid].last_ambiguous_kind = "merged"
+                costs[:, col] = 10.0
+                continue
+            x, y, width, height = detection["box"]
+            compatible = []
+            for track_id in track_ids:
+                # The ordinary association gate above already rejected this
+                # LOST fragment because its reacquire window expired.  It
+                # must not come back through the broader merged-contour
+                # heuristic and freeze a detection belonging to live cars.
+                if track_id not in reacquire_eligible_track_ids:
+                    continue
+                # Freezing a detection costs every listed track its only
+                # measurement this frame, so the merge hypothesis needs live
+                # evidence: the track was seen in the previous frame, or it is
+                # already inside an ongoing merged interval. A fragment that
+                # has merely been coasting for unrelated reasons can otherwise
+                # drift onto a real car and silence it.
+                if (
+                    int(self._tracks[track_id].consecutive_invisible_count) > 0
+                    and not self._has_recent_merged_freeze(self._tracks[track_id])
+                ):
+                    continue
+                px, py = predictions[track_id]
+                track = self._tracks[track_id]
+                if not (x - 12 <= px <= x + width + 12 and y - 12 <= py <= y + height + 12):
+                    continue
+                distance = float(np.linalg.norm(np.subtract((px, py), detection["point"])))
+                if distance > self.max_distance * 1.25:
+                    continue
+                appearance_distance = (
+                    histogram_distance(track.appearance, detection["hist"])
+                    if track.appearance is not None and detection.get('hist') is not None
+                    else 0.25
+                )
+                if appearance_distance > max(0.55, self.lost_appearance_threshold):
+                    continue
+                compatible.append(track_id)
+            if not compatible:
+                continue
+            reference_area = float(
+                np.median([np.prod(self._clean_size(self._tracks[track_id])) for track_id in compatible])
+            )
+            detection_bbox_area = float(
+                detection.get(
+                    "bbox_area", detection["box"][2] * detection["box"][3]
+                )
+            )
+            if detection_bbox_area < self.merged_detection_area_ratio * max(1.0, reference_area):
+                continue
+            event_type = "merged_detection_frozen"
+            if len(compatible) == 1:
+                stale_track_inside = any(
+                    track_id not in reacquire_eligible_track_ids
+                    and track_id not in self._suppressed_roi_edge_twin_ids
+                    and x - 12 <= predictions[track_id][0] <= x + width + 12
+                    and y - 12 <= predictions[track_id][1] <= y + height + 12
+                    for track_id in track_ids
+                )
+                # Preserve the stale-track rule: a LOST fragment past its
+                # reacquire window cannot make a current vehicle disappear.
+                if stale_track_inside:
+                    continue
+                # A wide/long jump relative to one *fresh* track is the same
+                # unsafe measurement, even if the neighbouring car has not
+                # yet become a compatible prediction.  Requiring an enlarged
+                # area prevents ordinary perspective variation from freezing
+                # a valid single-car observation.
+                reference_track = self._tracks[compatible[0]]
+                reference_w, reference_h = self._clean_size(reference_track)
+                width_ratio = width / max(1.0, reference_w)
+                height_ratio = height / max(1.0, reference_h)
+                if width_ratio < 1.30 and height_ratio < 1.30:
+                    continue
+                # One car's own motion trail is not an ambiguous measurement.
+                if self._elongation_explained_by_motion(
+                    reference_track, detection["box"]
+                ):
+                    self._last_association_events.append({
+                        "type": "oversized_detection_kept_as_motion_trail",
+                        "detection_id": int(col),
+                        "local_track_ids": [int(compatible[0])],
+                        "bbox": [int(value) for value in detection["box"]],
+                    })
+                    continue
+                event_type = "oversized_detection_frozen"
+            detection["ambiguous_merged"] = True
+            self._ambiguous_detection_ids.add(col)
+            self._viable_pairs.update((track_id, col) for track_id in compatible)
+            for track_id in compatible:
+                track = self._tracks[track_id]
+                track.last_ambiguous_frame = int(self._frame_idx)
+                track.last_ambiguous_source_frame = int(self._source_frame_idx)
+                track.last_ambiguous_timestamp_s = self._current_timestamp_s
+                track.last_ambiguous_kind = "merged"
+            for row in range(len(track_ids)):
+                costs[row, col] = 10.0
+            self._last_association_events.append({
+                "type": event_type,
+                "detection_id": int(col),
+                "local_track_ids": [int(value) for value in compatible],
+                "bbox": [int(value) for value in detection["box"]],
+            })
+
+        _, row_to_col, _ = lapjv(costs, extend_cost=True, cost_limit=self.assignment_cost_limit)
+        assignments, unmatched_tracks, unmatched_detections = [], [], set(range(len(detections)))
+        for row, track_id in enumerate(track_ids):
+            col = int(row_to_col[row])
+            if col < 0:
+                unmatched_tracks.append(track_id)
+            elif track_id in split_margin_track_ids:
+                # Priority 5: Use lineage score to adjust margin requirement.
+                # New/unreliable tracks need higher margin to prevent ID switches.
+                track = self._tracks[track_id]
+                lineage_score = self._lineage_score(track)
+                # Adjust margin: new tracks (low score) require 2x margin,
+                # established tracks (high score) require normal margin.
+                adjusted_margin = self.split_assignment_margin * (2.0 - lineage_score)
+                has_margin = self._assignment_has_margin(
+                    costs,
+                    row,
+                    col,
+                    adjusted_margin,
+                )
+                last_ambiguous_frame = getattr(track, "last_ambiguous_frame", None)
+                last_ambiguous_source_frame = getattr(track, "last_ambiguous_source_frame", None)
+                recently_ambiguous = (
+                    last_ambiguous_frame is not None
+                    and (
+                        int(self._source_frame_idx) - int(last_ambiguous_source_frame)
+                        if last_ambiguous_source_frame is not None
+                        else int(self._frame_idx) - int(last_ambiguous_frame)
+                    )
+                    <= self.ambiguous_recovery_frames
+                )
+                pair_metrics = self._pair_metrics.get((track_id, col), {})
+                # A unique, clean appearance/size/position observation is
+                # stronger evidence than a generic close-by detection.  It
+                # can close a merged interval immediately; otherwise require
+                # the configured clean-frame run before resuming a lineage.
+                clear_evidence = (
+                    has_margin
+                    and float(pair_metrics.get("total", 10.0)) <= 0.12
+                    and float(pair_metrics.get("appearance", 1.0)) <= 0.08
+                    and float(pair_metrics.get("size", 1.0)) <= 0.20
+                    and float(pair_metrics.get("position", 1.0)) <= 0.20
+                )
+                if not has_margin:
+                    # After a merged/lost interval, near-equal alternatives are
+                    # precisely where ID switches happen. Keep both lineages
+                    # coasting and suppress a new fragment until the split is
+                    # unambiguous instead of accepting LAPJV's arbitrary tie.
+                    unmatched_tracks.append(track_id)
+                    self._ambiguous_detection_ids.add(col)
+                    # Mark track as recovering to prevent premature GID allocation
+                    track.association_state = "split_recovering"
+                    self._last_association_events.append({
+                        "type": "split_assignment_deferred",
+                        "local_track_id": int(track_id),
+                        "detection_id": int(col),
+                        "selected_cost": round(float(costs[row, col]), 4),
+                        "required_margin": round(adjusted_margin, 4),
+                        "base_margin": round(self.split_assignment_margin, 4),
+                        "lineage_score": round(lineage_score, 3),
+                    })
+                elif recently_ambiguous and not clear_evidence and (
+                    int(getattr(track, "ambiguous_clear_streak", 0)) + 1
+                    < self.ambiguous_recovery_frames
+                ):
+                    # Do not resume a lineage on its first apparently clear
+                    # frame after a competition. Require a short clean run so
+                    # a moving car cannot inherit the stopped car's ID while
+                    # the two boxes are still touching.
+                    track.ambiguous_clear_streak = int(
+                        getattr(track, "ambiguous_clear_streak", 0)
+                    ) + 1
+                    unmatched_tracks.append(track_id)
+                    self._ambiguous_detection_ids.add(col)
+                    self._last_association_events.append({
+                        "type": "association_recovery_pending",
+                        "local_track_id": int(track_id),
+                        "detection_id": int(col),
+                        "clear_streak": int(track.ambiguous_clear_streak),
+                        "required_clear_frames": int(
+                            self.ambiguous_recovery_frames
+                        ),
+                    })
+                else:
+                    track.ambiguous_clear_streak = 0
+                    assignments.append((track_id, col, predictions[track_id]))
+                    unmatched_detections.discard(col)
+            else:
+                assignments.append((track_id, col, predictions[track_id]))
+                unmatched_detections.discard(col)
+        unmatched_detections.difference_update(self._ambiguous_detection_ids)
+        if self.enable_occlusion_guard:
+            assignments, deferred_tracks, deferred_detections = self.occlusion_guard.gate_assignments(
+                assignments, costs, track_ids, self._tracks, detections, self.split_assignment_margin)
+            unmatched_tracks = list(set(unmatched_tracks) | deferred_tracks)
+            self._ambiguous_detection_ids.update(deferred_detections)
+            unmatched_detections.difference_update(deferred_detections)
+        for tid, col, _ in assignments:
+            row = track_ids.index(tid)
+            detections[col]['appearance_trusted'] = bool(
+                detections[col].get('hist') is not None
+                and detections[col].get('observation_kind', 'detection') == 'detection'
+                and .65 <= (np.prod(detections[col]['box'][2:]) / max(1., np.prod(self._clean_size(self._tracks[tid])))) <= 1.6
+                and self._assignment_has_margin(costs, row, col, self.split_assignment_margin))
+        return assignments, unmatched_tracks, list(unmatched_detections)
+
+    def _create_or_reid(self, detection: dict) -> None:
+        point = detection["point"]
+
+        # Local IDs are fragment-scoped. Appearance-only reuse of an expired
+        # ID made consecutive detections cycle through unrelated historic
+        # tracks and reset fragment evidence every frame. Global identity
+        # recovery belongs to ``CrossCameraManager``; every new local fragment
+        # therefore receives a fresh monotonically increasing ID.
+
+        track_id = self._next_id
+        self._next_id += 1
+        box, point = detection["box"], detection["point"]
+        track = TrackedVehicle(
+            track_id=track_id, cx=point[0], cy=point[1], bbox=box, area=float(detection["area"]),
+            status=TrackStatus.CONFIRMED if self.min_visible_count == 1 else TrackStatus.TENTATIVE,
+            history=[point], entered_frame=self._frame_idx, last_seen_frame=self._frame_idx,
+            ground_point=self._ground_point(point),
+        )
+        track.kalman = self._new_kalman(point)
+        track.appearance = detection["hist"]
+        track.appearance_tracklet = AppearanceTracklet(
+            max_samples=self.tracklet_max_samples,
+            sample_interval=self.tracklet_sample_interval,
+        )
+        track.appearance_tracklet.update(detection["hist"], self._frame_idx)
+        self._remember_clean(track, detection)
+        track.spatial_appearance = detection.get('spatial_appearance')
+        track.association_state = "new_tentative"
+        track.assignment_cost = {}
+        # Preserve fragment origin independently of ``history``. The latter is
+        # intentionally bounded and must not silently move the origin used by
+        # confirmation or slot-departure direction checks.
+        track.first_observation_point = point
+        track.first_observation_bbox = box
+        track.first_observation_frame = self._frame_idx
+        track.first_observation_source_frame = self._source_frame_idx
+        track.history_source_frames = [self._source_frame_idx]
+        track.last_observation_source_frame = self._source_frame_idx
+        track.first_observation_timestamp_s = self._current_timestamp_s
+        track.last_seen_timestamp_s = self._current_timestamp_s
+        track.last_measured_center = (float(point[0]), float(point[1]))
+        track.last_measured_timestamp_s = self._current_timestamp_s
+        track.prediction_age_s = 0.0
+        track.velocity_confidence = 1.0
+        track.prediction_source = "measurement"
+        measured_at = self._current_timestamp_s if self._current_timestamp_s is not None else self._frame_idx/30.
+        measurements = list(getattr(track, 'measurement_observations', []))
+        if not measurements or measured_at > measurements[-1][0]:
+            measurements.append((measured_at, point, box))
+        track.measurement_observations = measurements[-8:]
+        track.fragment_visible_count = 1
+        track.fragment_area_history = [float(detection["area"])]
+        track.priority_track = bool(detection.get("priority", False))
+        track.priority_observation_count = 1 if track.priority_track else 0
+        track.roi_clipped = bool(detection.get("roi_clipped", False))
+        track.roi_support_ratio = float(detection.get("roi_support_ratio", 1.0))
+        track.roi_edge_twin_suppressed = False
+        track.dark_foreground_rescued = bool(
+            detection.get("dark_foreground_rescued", False)
+        )
+        track.mog_shadow_marker_ratio = float(
+            detection.get("mog_shadow_marker_ratio", 0.0)
+        )
+        self._tracks[track_id] = track
+
+    def _is_confirmable(self, track: TrackedVehicle) -> bool:
+        priority_track = bool(getattr(track, "priority_track", False))
+        min_visible_count = self.priority_min_visible_count if priority_track else self.min_visible_count
+        min_displacement = (
+            self.priority_min_confirm_displacement
+            if priority_track
+            else self.min_confirm_displacement
+        )
+        if track.total_visible_count < min_visible_count:
+            return False
+        if priority_track and getattr(track, "priority_observation_count", 0) < self.priority_min_visible_count:
+            return False
+        if min_displacement <= 0:
+            return True
+        # Stable fragment origins let the multiscale DroidCam mode accumulate
+        # very slow travel beyond the bounded display history.  Keep the
+        # legacy rolling-window confirmation semantics for older entry points
+        # that did not opt into multiscale motion.
+        origin = (
+            getattr(track, "first_observation_point", track.history[0])
+            if self.enable_multiscale_motion
+            else track.history[0]
+        )
+        return np.linalg.norm(np.subtract((track.cx, track.cy), origin)) >= min_displacement
+
+    def _apply_detection(self, track: TrackedVehicle, detection: dict) -> None:
+        point, box = detection["point"], detection["box"]
+
+        # Priority 3: Freeze appearance and bbox size during merged/occluded interval
+        # Khi detection hợp nhất (merged/oversized), không cập nhật appearance, bbox size,
+        # chỉ dùng Kalman prediction. ID duplicate tạm thời ít nguy hiểm hơn ID collision.
+        is_merged_or_ambiguous = bool(detection.get("ambiguous_merged", False))
+
+        if is_merged_or_ambiguous:
+            # Never describe a prediction as a fresh detection.
+            track.observation_kind = 'occluded_prediction'
+            # KHÔNG cập nhật: kalman.correct, appearance, bbox, area
+            # Track sẽ coasting dựa trên Kalman prediction
+            self._last_association_events.append({
+                "type": "track_frozen_merged_detection",
+                "local_track_id": int(track.track_id),
+                "frame": int(self._frame_idx),
+                "reason": "merged_or_ambiguous_detection",
+            })
+            return
+
+        # Normal detection: cập nhật đầy đủ
+        track.kalman.correct(np.array([[point[0]], [point[1]]], dtype=np.float32))
+        track.cx, track.cy, track.bbox, track.area = point[0], point[1], box, float(detection["area"])
+        track.age += 1
+        track.total_visible_count += 1
+        track.fragment_visible_count = int(
+            getattr(track, "fragment_visible_count", 0)
+        ) + 1
+        fragment_areas = list(getattr(track, "fragment_area_history", ()))
+        fragment_areas.append(float(detection["area"]))
+        track.fragment_area_history = fragment_areas[-12:]
+        track.consecutive_invisible_count = 0
+        track.last_seen_frame = self._frame_idx
+        track.last_observation_source_frame = self._source_frame_idx
+        track.last_seen_timestamp_s = self._current_timestamp_s
+        track.last_measured_center = (float(point[0]), float(point[1]))
+        track.last_measured_timestamp_s = self._current_timestamp_s
+        track.prediction_age_s = 0.0
+        track.velocity_confidence = 1.0
+        track.prediction_source = "measurement"
+        track.ground_point = self._ground_point(point)
+        track.roi_clipped = bool(detection.get("roi_clipped", False))
+        track.roi_support_ratio = float(detection.get("roi_support_ratio", 1.0))
+        track.roi_edge_starved = False
+        track.dark_foreground_rescued = bool(
+            detection.get("dark_foreground_rescued", False)
+        )
+        track.mog_shadow_marker_ratio = float(
+            detection.get("mog_shadow_marker_ratio", 0.0)
+        )
+        measured_at = self._current_timestamp_s if self._current_timestamp_s is not None else self._frame_idx/30.
+        measurements = list(getattr(track, 'measurement_observations', []))
+        if not measurements or measured_at > measurements[-1][0]:
+            measurements.append((measured_at, point, box))
+        track.measurement_observations = measurements[-8:]
+        trusted = detection.get('appearance_trusted', True) and detection.get('hist') is not None
+        if trusted:
+            if track.appearance is None:
+                track.appearance = detection['hist'].copy()
+            else:
+                if self._source_dt == 1:
+                    track.appearance = cv2.addWeighted(track.appearance, .75, detection['hist'], .25, 0)
+                else:
+                    retained = .75 ** self._source_dt
+                    track.appearance = cv2.addWeighted(
+                        track.appearance, retained, detection['hist'], 1.0 - retained, 0
+                    )
+        if track.appearance_tracklet is None:
+            track.appearance_tracklet = AppearanceTracklet(
+                max_samples=self.tracklet_max_samples,
+                sample_interval=self.tracklet_sample_interval,
+            )
+        if trusted:
+            track.appearance_tracklet.update(detection["hist"], self._frame_idx)
+            self._remember_clean(track, detection)
+            track.spatial_appearance = detection.get('spatial_appearance')
+        track.observation_kind = detection.get('observation_kind', 'detection')
+        if detection.get("priority", False):
+            track.priority_track = True
+            track.priority_observation_count = getattr(track, "priority_observation_count", 0) + 1
+        track.status = TrackStatus.CONFIRMED if self._is_confirmable(track) else TrackStatus.TENTATIVE
+        track.history.append(point)
+        if not hasattr(track, "history_source_frames"):
+            track.history_source_frames = [self._frame_idx] * (len(track.history) - 1)
+        track.history_source_frames.append(self._source_frame_idx)
+        if len(track.history) > self.history_len:
+            track.history = track.history[-self.history_len:]
+            track.history_source_frames = track.history_source_frames[-self.history_len:]
+
+    def _stationary_at_rest(self, track) -> bool:
+        """P26: fragment có đang đứng yên tại chỗ không.
+
+        ``track.history`` là deque các ``point`` dạng ``(x, y)``, chỉ được nối
+        thêm khi có **detection mới**. Khi detector bỏ dấu xe (xe vừa dừng),
+        history đứng im — nên phải xét các mẫu **cuối** của nó, và chịu được
+        việc cửa sổ trượt cắt mất phần đầu.
+
+        Đây là điều kiện *thêm* để giữ fragment sống qua TTL; nó không nới
+        lỏng bất kỳ ngưỡng nhận dạng nào.
+        """
+        history = getattr(track, "history", None) or []
+        points: list[tuple[float, float]] = []
+        for entry in list(history)[-4:]:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            try:
+                points.append((float(entry[0]), float(entry[1])))
+            except (TypeError, ValueError):
+                continue
+        if len(points) < 2:
+            return False
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        spread = max(max(xs) - min(xs), max(ys) - min(ys))
+        if spread <= STATIONARY_AT_REST_PX:
+            return True
+        # Cửa sổ trượt có thể vắt qua đúng lúc xe đang chạy → dừng. Xe đã dừng
+        # thì các mẫu CUỐI gần như trùng nhau; kiểm thêm hai mẫu cuối cùng.
+        if len(points) >= 2:
+            last, previous = points[-1], points[-2]
+            if (
+                abs(last[0] - previous[0]) <= STATIONARY_AT_REST_PX
+                and abs(last[1] - previous[1]) <= STATIONARY_AT_REST_PX
+            ):
+                return True
+        return False
+
+    def suspend_track(self, track_id: int, reason: str = "parked") -> Optional[TrackedVehicle]:
+        """Remove a parked local fragment from ordinary motion association."""
+        track = self._tracks.pop(int(track_id), None)
+        if track is None:
+            return None
+        track.association_state = f"suspended_{reason}"
+        self._suspended_tracks[int(track_id)] = track
+        self._last_association_events.append({
+            "type": "parked_local_track_suspended",
+            "local_track_id": int(track_id),
+            "reason": str(reason),
+        })
+        return track
+
+    def _lost_beyond_ttl_seconds(self, track: TrackedVehicle) -> bool:
+        """Has this fragment been unmatched for longer than the duration TTL?
+
+        Frame-counted TTLs stretch with the processing rate: at ~7 FPS the
+        90-frame default kept fragments for over 13 seconds even though they
+        stopped being re-associable after 1.5-3 seconds. Timestamp-less
+        callers keep the frame-only behaviour.
+        """
+        last_seen = getattr(track, "last_seen_timestamp_s", None)
+        if self._current_timestamp_s is None or last_seen is None:
+            return False
+        return (
+            self._current_timestamp_s - float(last_seen) > self.lost_track_ttl_seconds
+        )
+
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        timestamp_s: Optional[float] = None,
+        priority_regions: Optional[Sequence[Any]] = None,
+        prepared_motion: Optional[tuple] = None,
+        source_frame_idx: Optional[int] = None,
+    ):
+        """Process one frame while preserving the legacy three-value return.
+
+        ``timestamp_s`` makes slow/fast temporal references independent of
+        effective FPS. ``priority_regions`` are temporary recovery polygons in
+        which smaller slow-moving blobs may become *tentative* candidates. A
+        priority candidate still needs two observations and displacement, so a
+        one-frame shadow/noise blob cannot become a confirmed/local Global-ID
+        candidate.
+        """
+        self._frame_idx += 1
+        source_idx = (
+            int(source_frame_idx)
+            if source_frame_idx is not None
+            else self._frame_idx
+        )
+        self._source_dt = (
+            max(1, source_idx - self._last_source_frame_idx)
+            if self._last_source_frame_idx is not None
+            else 1
+        )
+        self._source_frame_idx = source_idx
+        self._last_source_frame_idx = source_idx
+        self._current_timestamp_s = (
+            float(timestamp_s)
+            if timestamp_s is not None and np.isfinite(timestamp_s)
+            else None
+        )
+        self._last_association_events = []
+        self._newly_lost_tracks = []
+        self._roi_rejected_points = []
+        predictions = self._predict_tracks()
+        if self.enable_occlusion_guard:
+            self.occlusion_guard.prepare(self._tracks, predictions,
+                self._current_timestamp_s if self._current_timestamp_s is not None else self._frame_idx / 30.0,
+                self._frame_idx)
+        if prepared_motion is None:
+            # Preserve the existing override/monkeypatch signature for callers
+            # that do not opt into the read-ahead pipeline.
+            detections, mask = self._detect(
+                frame,
+                timestamp_s=self._current_timestamp_s,
+                priority_regions=priority_regions,
+            )
+        else:
+            detections, mask = self._detect(
+                frame,
+                timestamp_s=self._current_timestamp_s,
+                priority_regions=priority_regions,
+                prepared_motion=prepared_motion,
+            )
+        for rejection in self._last_detection_rejections[:32]:
+            self._last_association_events.append({
+                **dict(rejection),
+                "stage": "motion_detection",
+            })
+        for rejection in self._last_shadow_rejections[:32]:
+            self._last_association_events.append({
+                "type": "cast_shadow_rejected",
+                **dict(rejection),
+                "stage": "motion_detection",
+            })
+        assignments, unmatched_tracks, unmatched_detections = self._assign(detections)
+        for track_id, detection_id, _ in assignments:
+            self._apply_detection(self._tracks[track_id], detections[detection_id])
+            track = self._tracks[track_id]
+            track.association_state = "matched"
+            track.assignment_cost = dict(
+                self._pair_metrics.get((track_id, detection_id), {})
+            )
+        expired = []
+        for track_id in unmatched_tracks:
+            track = self._tracks[track_id]
+            track.age += 1
+            track.consecutive_invisible_count += 1
+            track.prediction_age_s = self._prediction_age_seconds(track)
+            if track.prediction_age_s > self._prediction_age_limit_seconds(track):
+                track.prediction_source = "stale_prediction"
+                track.velocity_confidence = 0.0
+            elif track.prediction_source == "measurement":
+                track.prediction_source = "kalman_prediction"
+            frozen = track_id in self.occlusion_guard.frozen or any(
+                detection_id in self._ambiguous_detection_ids
+                and (track_id, detection_id) in self._viable_pairs
+                for detection_id in self._ambiguous_detection_ids
+            )
+            if track_id in self._suppressed_roi_edge_twin_ids:
+                # A duplicate lineage parked on an ROI-clipped vehicle: kept
+                # for audit/TTL, but invisible to identity allocation.
+                track.association_state = "suppressed_roi_edge_twin"
+                track.observation_kind = 'prediction'
+            else:
+                track.association_state = "frozen_ambiguous" if frozen else "coasting"
+                track.observation_kind = 'occluded_prediction' if frozen else 'prediction'
+            track.assignment_cost = {}
+            if (
+                track.consecutive_invisible_count > 0
+                and track_id not in self._suppressed_roi_edge_twin_ids
+                and self._roi_rejected_points
+            ):
+                # Rejected detections never reach association, so a car
+                # drifting into an ROI-edge dead zone starves its own track.
+                # Mark the vanish so the GID manager can weaken the
+                # same-camera 'different car' prior there.  Sticky until a
+                # real match clears it in _apply_detection.
+                predicted_point = predictions.get(track_id)
+                if predicted_point is None:
+                    predicted_point = (track.cx, track.cy)
+                for rejected_point in self._roi_rejected_points:
+                    if np.hypot(
+                        rejected_point[0] - predicted_point[0],
+                        rejected_point[1] - predicted_point[1],
+                    ) <= self.max_distance:
+                        track.roi_edge_starved = True
+                        break
+            if track.status == TrackStatus.CONFIRMED:
+                track.status = TrackStatus.LOST
+                self._newly_lost_tracks.append((track_id, track))
+            # P26 (lead duyet 5.2): mot fragment DA THAY THAT (>=5 khung hinh)
+            # dang dung yen tai cho khong duoc TTL don di chi vi detector bo
+            # mat no vai giay. Do duoc tren V049 sang_5p: local 11 duoc cap
+            # GID 1 o f562-566, roi bi TTL `_tracks.pop` o f678 => binding mo
+            # coi => xe quay lai voi GID 22.
+            #
+            # Ap dung cho CA HAI nhanh TTL: dem theo frame VA dem theo giay
+            # (``_lost_beyond_ttl_seconds`` mac dinh 1.5 s -- day chinh la
+            # nhanh da giet local 11 o f678, vi luc do invisible chi ~13 frame
+            # nhung da qua 4,4 giay).
+            hold_stationary = (
+                self.hold_stationary_fragment_ttl
+                and int(getattr(track, "fragment_visible_count", 0) or 0) >= 5
+                and self._stationary_at_rest(track)
+            )
+            # Source-frame TTL remains meaningful when live replay skips
+            # intermediate frames. At dt=1 it equals the legacy invisible
+            # count; timestamp TTL retains the existing P26 protection.
+            last_source_frame = getattr(track, "last_observation_source_frame", None)
+            invisible_source_frames = (
+                self._source_frame_idx - int(last_source_frame)
+                if last_source_frame is not None
+                else track.consecutive_invisible_count
+            )
+            if not hold_stationary and (
+                invisible_source_frames > self.lost_track_ttl
+                or self._lost_beyond_ttl_seconds(track)
+            ):
+                expired.append(track_id)
+        expired_tracks = []  # Danh sách tracks vừa expire frame này
+        for track_id in expired:
+            track = self._tracks.pop(track_id)
+            # Blob nhiễu chưa từng đủ điều kiện xác nhận không được đưa vào output.
+            if track.status != TrackStatus.TENTATIVE:
+                track.exited_frame = self._frame_idx
+                self._exited_tracks[track_id] = track
+                expired_tracks.append((track_id, track))
+        # Do not create a second local track from the old silhouette of a
+        # vehicle that already received this frame's primary detection.
+        matched_tracks = [self._tracks[track_id] for track_id, _, _ in assignments]
+        unmatched_track_ids = set(unmatched_tracks)
+        unmatched_detections = [
+            detection_id for detection_id in unmatched_detections
+            if not (
+                any(
+                    self._is_echo_of_matched_track(detections[detection_id], track)
+                    for track in matched_tracks
+                )
+                and not any(
+                    (track_id, detection_id) in self._viable_pairs
+                    for track_id in unmatched_track_ids
+                )
+            )
+        ]
+        for detection_id in unmatched_detections:
+            if detections[detection_id].get('occlusion_members'):
+                continue
+            if self._unresolved_merged_birth(detections[detection_id]):
+                continue
+            self._create_or_reid(detections[detection_id])
+        self._last_association_events.extend(self.occlusion_guard.events)
+        return self._tracks, mask, expired_tracks
+
+    def draw_tracks(
+        self,
+        frame: np.ndarray,
+        tracks=None,
+        show_non_active: bool = False,
+        id_overrides: Optional[Dict[int, int]] = None,
+        confirmed_color: Tuple[int, int, int] = (0, 255, 0),
+        confirmed_label: Optional[str] = None,
+        point_color: Tuple[int, int, int] = (0, 0, 255),
+    ) -> np.ndarray:
+        out = frame.copy()
+        tracks = self._tracks if tracks is None else tracks
+        for track in tracks.values():
+            if not show_non_active and track.status != TrackStatus.CONFIRMED:
+                continue
+            color = confirmed_color if track.status == TrackStatus.CONFIRMED else (0, 165, 255)
+            cv2.rectangle(out, (track.x, track.y), (track.x + track.w, track.y + track.h), color, 2)
+            shown_id = id_overrides.get(track.track_id, track.track_id) if id_overrides else track.track_id
+            status_label = confirmed_label if track.status == TrackStatus.CONFIRMED and confirmed_label else track.status.value
+            cv2.putText(out, f"G#{shown_id} {status_label}", (track.x, max(16, track.y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            cv2.circle(out, (track.cx, track.cy), 3, point_color, -1)
+        return out
+
+    @property
+    def confirmed_tracks(self):
+        return {track_id: track for track_id, track in self._tracks.items() if track.status in (TrackStatus.CONFIRMED, TrackStatus.LOST)}
+
+    @property
+    def active_tracks(self):
+        return {track_id: track for track_id, track in self._tracks.items() if track.status == TrackStatus.CONFIRMED and track.consecutive_invisible_count == 0}
+
+    @property
+    def observable_tracks(self):
+        """Tracks detected in the current frame, including tentative ones.
+
+        Cross-camera handoff needs the first observation in the destination
+        camera.  ``active_tracks`` deliberately hides tentative tracks from the
+        UI and JSON, while this view lets the global-ID manager bind an old ID
+        before local confirmation completes.
+
+        P26 (lead duyet 5.2): một fragment **đã từng được thấy thật** (>=5
+        khung hình) và đang **đứng yên tại chỗ** vẫn được coi là quan sát được
+        dù frame này detector không trả về nó. Nếu không, binding GID vừa cấp
+        sẽ rơi ngay khi `consecutive_invisible_count` thành 1 — đúng lỗi V049
+        sang_5p (local 11 được cấp GID 1 ở f562-566 rồi mất ở f567, xe quay
+        lại mang GID 22).
+
+        KHÔNG mở cho fragment đang chạy: ``_stationary_at_rest`` đòi biên độ
+        dịch chuyển <= ``STATIONARY_AT_REST_PX`` trên các mẫu gần nhất.
+        """
+        def _held(candidate) -> bool:
+            """P26: fragment đứng yên, đã thấy thật, giữ dù detector bỏ dấu."""
+            return (
+                self.hold_stationary_fragment_ttl
+                and int(getattr(candidate, "fragment_visible_count", 0) or 0) >= 5
+                and self._stationary_at_rest(candidate)
+            )
+
+        return {
+            track_id: track
+            for track_id, track in self._tracks.items()
+            if (track.consecutive_invisible_count == 0 or _held(track))
+            and (
+                track.status in (TrackStatus.TENTATIVE, TrackStatus.CONFIRMED)
+                # P26: xe đứng yên vừa bị chuyển LOST vẫn là cùng chiếc xe;
+                # giữ nó trong khung nhìn của bộ cấp GID để không mất GID.
+                or (track.status == TrackStatus.LOST and _held(track))
+            )
+        }
+
+    @property
+    def newly_lost_tracks(self):
+        """Confirmed tracks that disappeared in this exact frame."""
+        return list(self._newly_lost_tracks)
+
+    @property
+    def all_tracks(self):
+        return dict(self._tracks)
+
+    @property
+    def exited_tracks(self):
+        return dict(self._exited_tracks)
+
+    @property
+    def frame_index(self):
+        return self._frame_idx
+
+    @property
+    def last_shadow_rejections(self):
+        """Cast-shadow blobs rejected in the latest frame, for diagnostics."""
+        return [dict(item) for item in self._last_shadow_rejections]
+
+    @property
+    def last_detection_rejections(self):
+        """Oversized/out-of-ROI foreground blobs rejected this frame."""
+        return [dict(item) for item in self._last_detection_rejections]
+
+    @property
+    def association_events(self):
+        return [dict(item) for item in self._last_association_events]
+
+    def local_track_telemetry(self, global_ids: Optional[Dict[int, int]] = None) -> List[dict]:
+        """Return JSON-safe association evidence for experiment recordings."""
+        global_ids = global_ids or {}
+        records = []
+        for local_id, track in sorted(self._tracks.items()):
+            velocity_x, velocity_y = self._track_velocity_px_per_frame(track)
+            predicted_center = self._predictions.get(int(local_id))
+            # Keep the stale box for diagnostics/visualisation but never
+            # advertise its old GID as a fresh physical observation. P26's
+            # evidence-backed stationary hold retains its identity.
+            stale_ghost = (
+                track.status == TrackStatus.LOST
+                and getattr(track, "prediction_source", None) == "stale_prediction"
+                and not _P38_DISABLE_B3
+                and not (                    self.hold_stationary_fragment_ttl
+                    and int(getattr(track, "fragment_visible_count", 0) or 0) >= 5
+                    and self._stationary_at_rest(track)
+                )
+            )
+            records.append({
+                "local_track_id": int(local_id),
+                "global_id": (
+                    int(global_ids[local_id])
+                    if local_id in global_ids and not stale_ghost else None
+                ),
+                "bbox": [int(value) for value in track.bbox],
+                "center": [int(track.cx), int(track.cy)],
+                "state": track.status.value,
+                "invisible_count": int(track.consecutive_invisible_count),
+                "association_state": str(
+                    getattr(track, "association_state", "unknown")
+                ),
+                "assignment_cost": dict(
+                    getattr(track, "assignment_cost", {}) or {}
+                ),
+                "prediction_source": str(
+                    getattr(track, "prediction_source", "unknown")
+                ),
+                "predicted_center": (
+                    [int(predicted_center[0]), int(predicted_center[1])]
+                    if predicted_center is not None
+                    else None
+                ),
+                "velocity_px_per_frame": [
+                    round(float(velocity_x), 3),
+                    round(float(velocity_y), 3),
+                ],
+                "prediction_age_s": round(
+                    float(getattr(track, "prediction_age_s", 0.0)), 3
+                ),
+                "velocity_confidence": round(
+                    float(getattr(track, "velocity_confidence", 0.0)), 3
+                ),
+                "observation_kind": getattr(track, 'observation_kind', 'detection'),
+                "occlusion_group": list(getattr(track, 'occlusion_group', None) or ()),
+                "fragment_visible_count": int(
+                    getattr(track, "fragment_visible_count", 0)
+                ),
+                "first_observation_frame": int(
+                    getattr(track, "first_observation_frame", self._frame_idx)
+                ),
+                "roi_clipped": bool(getattr(track, "roi_clipped", False)),
+                "roi_support_ratio": round(
+                    float(getattr(track, "roi_support_ratio", 1.0)), 4
+                ),
+                "roi_edge_twin_suppressed": bool(
+                    getattr(track, "roi_edge_twin_suppressed", False)
+                ),
+                "dark_foreground_rescued": bool(
+                    getattr(track, "dark_foreground_rescued", False)
+                ),
+                "mog_shadow_marker_ratio": round(
+                    float(getattr(track, "mog_shadow_marker_ratio", 0.0)), 4
+                ),
+            })
+        return records

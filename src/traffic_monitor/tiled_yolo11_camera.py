@@ -129,6 +129,12 @@ def run_tiled_yolo11(
         raise RuntimeError(f"Không đọc được frame đầu từ nguồn: {source_path}")
     proc_w = min(width, orig_w)
     proc_h = round(orig_h * proc_w / orig_w)
+    # OpenCV's MP4 writer silently rounds odd dimensions down.
+    proc_w -= proc_w % 2
+    proc_h -= proc_h % 2
+    if proc_w < 2 or proc_h < 2:
+        cap.release()
+        raise RuntimeError("Video dimensions are too small")
 
     # Khi bỏ frame (frame_skip=N), tracker chỉ thấy 1/N video FPS nên
     # frame_rate của tracker phải gọi theo tốc độ frame đã qua xử lý.
@@ -149,6 +155,10 @@ def run_tiled_yolo11(
             fps,
             (proc_w, proc_h),
         )
+        if not writer.isOpened():
+            cap.release()
+            preview.close()
+            raise RuntimeError("Could not create output video")
 
     jsonl_file = open(output_path / "tracks.jsonl", "w", encoding="utf-8")
 
@@ -195,7 +205,9 @@ def run_tiled_yolo11(
                 sv_dets = sv_dets.with_nms(threshold=0.50)
                 tracked_dets = tracker.update_with_detections(sv_dets)
             else:
-                tracked_dets = sv.Detections.empty()
+                # Advance ByteTrack even when YOLO finds nothing in this frame.
+                # Otherwise old tracks never age out and may receive a wrong ID match.
+                tracked_dets = tracker.update_with_detections(sv.Detections.empty())
 
             records = []
             timestamp_ms = round(phys_no * 1000 / fps)

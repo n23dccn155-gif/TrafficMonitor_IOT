@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TrafficMonitor IoT - Hệ Thống Giám Sát Giao Thông</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+
+  <!-- Top App Header -->
+  <header class="app-header">
+    <div class="brand-wrapper">
+      <div class="brand-logo-icon">TM</div>
+      <div>
+        <span class="brand-title">TRAFFIC MONITOR IoT</span>
+        <span class="brand-subtitle">| Hệ Thống Giám Sát Vi Phạm</span>
+      </div>
+    </div>
+
+    <!-- Stepper Navigation -->
+    <nav class="stepper-nav">
+      <div id="stepNav1" class="step-item active">
+        <span class="step-num">1</span>
+        <span>Chọn Nguồn</span>
+      </div>
+      <span class="step-arrow">➔</span>
+      <div id="stepNav2" class="step-item">
+        <span class="step-num">2</span>
+        <span>Vẽ Quy Ước Đường</span>
+      </div>
+      <span class="step-arrow">➔</span>
+      <div id="stepNav3" class="step-item">
+        <span class="step-num">3</span>
+        <span>Giám Sát Tự Động</span>
+      </div>
+    </nav>
+
+    <!-- Header Actions -->
+    <div class="header-actions">
+      <button class="btn-outline" style="font-size:0.75rem; padding: 4px 8px;" onclick="app.resetToSourceSelection()">
+        🔄 Đổi Nguồn
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Dashboard Container (100% Fit Screen, No Scroll) -->
+  <main class="dashboard-container">
+
+    <!-- LEFT COLUMN (2/3 Viewport) -->
+    <section class="viewport-column">
+
+      <!-- STATE 1: Centered Source Selection Modal (Right in the middle of big frame) -->
+      <div id="sourceModalOverlay" class="source-modal-overlay">
+        <div class="source-card">
+          <h2 class="source-card-title">CHỌN NGUỒN VIDEO HOẶC CAMERA</h2>
+          <p class="source-card-desc">Vui lòng chọn nguồn để hệ thống lấy khung hình đầu tiên cho bạn vẽ quy ước ngã tư</p>
+
+          <!-- Option 1: MP4 File -->
+          <div id="optionMp4Group" class="source-option-group selected" onclick="app.selectSourceMode('mp4')">
+            <div class="source-option-header">
+              <input type="radio" id="radioMp4" name="sourceTypeRadio" checked>
+              <label for="radioMp4" style="cursor:pointer;">Nguồn 1: Video File MP4 (Cục Bộ)</label>
+            </div>
+            <div class="source-input-row">
+              <select id="videoSelect" style="flex:1;" onchange="app.onVideoDropdownChange(this.value)">
+                <option value="vd3.mp4">vd3.mp4 (Video mẫu ngã tư chuẩn)</option>
+              </select>
+              <input type="file" id="videoFileInput" accept=".mp4" style="display:none;" onchange="app.handleFileUpload(this)">
+              <button type="button" class="btn-outline" onclick="document.getElementById('videoFileInput').click()">📁 Mở File Khác</button>
+            </div>
+          </div>
+
+          <!-- Option 2: Live Camera / DroidCam -->
+          <div id="optionLiveGroup" class="source-option-group" onclick="app.selectSourceMode('live')">
+            <div class="source-option-header">
+              <input type="radio" id="radioLive" name="sourceTypeRadio">
+              <label for="radioLive" style="cursor:pointer;">Nguồn 2: Camera Trực Tiếp (DroidCam / RTSP URL)</label>
+            </div>
+            <div class="source-input-row" style="margin-bottom:0.4rem;">
+              <input type="text" id="cameraUrlInput" value="http://192.168.1.15:4747/video" placeholder="http://<ip>:<port>/video" style="flex:1;">
+            </div>
+            <div style="display:flex; gap:0.5rem;">
+              <button type="button" class="btn-outline" style="flex:1;" onclick="app.testMockStream()">Thử Luồng Giả Lập</button>
+              <button type="button" class="btn-primary" style="flex:1;" onclick="app.connectLiveCamera()">Kết Nối Camera</button>
+            </div>
+          </div>
+
+          <!-- Confirm Button -->
+          <button type="button" class="btn-primary" style="width:100%; justify-content:center; padding:10px; font-size:0.9rem;" onclick="app.confirmSourceAndProceed()">
+            ➡️ Xác Nhận Nguồn & Vẽ Quy Ước Đường
+          </button>
+        </div>
+      </div>
+
+      <!-- STATE 2: Road Convention Canvas Editor (Directly in viewport) -->
+      <div id="editorContainer" style="display:none; flex-direction:column; height:100%; width:100%;">
+        <!-- Dòng 1: Danh sách các phần cần vẽ trên ngã tư -->
+        <div class="editor-toolbar-row1">
+          <label style="font-size:0.75rem; font-weight:700; color:var(--text-muted); margin-right:2px;">ĐƯỜNG A:</label>
+          <button class="tool-btn active" data-tool="road_A" onclick="editor.setTool('road_A'); highlightToolBtn(this);">Vùng Đường A</button>
+          <button class="tool-btn" data-tool="boundary_A" onclick="editor.setTool('boundary_A'); highlightToolBtn(this);">Tim Đường A</button>
+          <button class="tool-btn" data-tool="stop_A1" onclick="editor.setTool('stop_A1'); highlightToolBtn(this);">Stop A1</button>
+          <button class="tool-btn" data-tool="stop_A2" onclick="editor.setTool('stop_A2'); highlightToolBtn(this);">Stop A2</button>
+
+          <span style="border-left:1px solid var(--border-color); height:18px; margin:0 4px;"></span>
+
+          <label style="font-size:0.75rem; font-weight:700; color:var(--text-muted); margin-right:2px;">ĐƯỜNG B:</label>
+          <button class="tool-btn" data-tool="road_B" onclick="editor.setTool('road_B'); highlightToolBtn(this);">Vùng Đường B</button>
+          <button class="tool-btn" data-tool="boundary_B" onclick="editor.setTool('boundary_B'); highlightToolBtn(this);">Tim Đường B</button>
+          <button class="tool-btn" data-tool="stop_B1" onclick="editor.setTool('stop_B1'); highlightToolBtn(this);">Stop B1</button>
+          <button class="tool-btn" data-tool="stop_B2" onclick="editor.setTool('stop_B2'); highlightToolBtn(this);">Stop B2</button>
+
+          <span style="border-left:1px solid var(--border-color); height:18px; margin:0 4px;"></span>
+
+          <span style="font-size:0.74rem; color:var(--text-muted);">Ngã tư: tự tạo từ 4 vạch dừng</span>
+        </div>
+
+        <!-- Dòng 2: Các nút thao tác lệnh & dòng chỉ dẫn -->
+        <div class="editor-toolbar-row2">
+          <div style="display:flex; align-items:center; gap:0.4rem;">
+            <button type="button" class="btn-success" style="padding:5px 12px; font-size:0.78rem;" onclick="editor.commitCurrentPart()">✓ Lưu</button>
+            <button type="button" class="btn-outline" style="padding:5px 10px; font-size:0.75rem;" onclick="editor.undoLastPoint()">↩ Xóa điểm</button>
+            <button type="button" class="btn-outline" style="padding:5px 10px; font-size:0.75rem;" onclick="editor.clearCurrentToolPart()">🗑 Xóa riêng</button>
+            <button type="button" class="btn-danger" style="padding:5px 8px; font-size:0.75rem;" onclick="editor.clearAll()">Xóa hết</button>
+            <button type="button" class="btn-outline" style="padding:5px 10px; font-size:0.75rem; color:#2563eb; border-color:#93c5fd; font-weight:600;" onclick="editor.refreshSnapshot()" title="Chụp lại khung hình mới nhất từ camera hoặc video">📸 Chụp lại ảnh</button>
+          </div>
+
+          <div id="editorGuideText" class="editor-guide-text">
+            👉 Vẽ toàn bộ Đường A, bấm Lưu, rồi vẽ tim đường và các vạch dừng.
+          </div>
+
+          <button type="button" class="btn-primary" style="padding:6px 18px; font-size:0.85rem;" onclick="app.saveRoadConventionsAndStartMonitoring()">
+            💾 Lưu và Chạy
+          </button>
+        </div>
+
+        <!-- Canvas Drawing Area -->
+        <div class="editor-canvas-wrapper">
+          <canvas id="editorCanvas"></canvas>
+        </div>
+      </div>
+
+      <!-- STATE 3: Monitoring Viewport (Live Video Player & Overlays) -->
+      <div id="monitorContainer" style="display:none; flex-direction:column; height:100%; width:100%;">
+        <div class="monitor-viewport-wrapper">
+          <video id="mainVideo" controls crossorigin="anonymous" playsinline></video>
+          <canvas id="overlayCanvas"></canvas>
+        </div>
+
+        <div class="viewport-bottom-bar">
+          <div style="display:flex; align-items:center; gap:0.75rem;">
+            <span id="monitoringStatusBadge" class="violation-badge badge-blue">Đang Giám Sát Tự Động</span>
+            <span id="timecodeDisplay" style="font-weight:600; font-size:0.8rem; color:var(--text-body);">0.0s / 0.0s</span>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <span id="trackingControl" style="display:inline-flex; align-items:center; gap:0.5rem;">
+              <label style="font-size:0.75rem; color:var(--text-muted);">Hiển thị Box xe:</label>
+              <select id="trackingRunSelect" style="font-size:0.75rem; padding:3px 6px;" onchange="app.onTrackingRunChange(this.value)">
+                <option value="">Đang tìm bản nhận diện...</option>
+              </select>
+            </span>
+            <button id="rulesRunButton" class="btn-outline" style="font-size:0.75rem; padding:4px 8px;" onclick="app.triggerRerunRules()">⚡ Quét Vi Phạm</button>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- RIGHT COLUMN (1/3 Controls & Evidence) -->
+    <aside class="control-column">
+
+      <!-- Top Block: Traffic Light Controller -->
+      <div class="signal-card">
+        <div class="panel-header">
+          <span class="panel-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+            ĐÈN GIAO THÔNG (ĐƯỜNG A & B)
+          </span>
+          <span id="currentPhaseBadge" class="violation-badge badge-green" style="font-size:0.7rem;">A_GREEN</span>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:8px 0; font-size:0.74rem;">
+          <label for="arduinoPort">Arduino Uno USB</label>
+          <input id="arduinoPort" value="COM3" aria-label="Arduino COM port" style="width:65px; padding:4px;">
+          <button id="arduinoConnectButton" class="btn-outline" type="button" onclick="signalPanel.toggleHardware()">Kết nối</button>
+          <span id="arduinoStatus" role="status">Mô phỏng trên web</span>
+        </div>
+
+        <!-- Mode Switch Tabs -->
+        <div class="signal-mode-tabs">
+          <div id="tabTimed" class="signal-tab active" onclick="signalPanel.setMode('timed')">⏱ Tự Động Theo Giây</div>
+          <div id="tabManual" class="signal-tab" onclick="signalPanel.setMode('manual')">👆 Chuyển Đèn Thủ Công</div>
+        </div>
+
+        <!-- Timed Mode Inputs -->
+        <div id="timedInputsBox" class="timed-inputs-box">
+          <div class="timed-input-row">
+            <span>Tuyến A:</span>
+            <div>
+              Xanh <input type="number" id="inputAGreenSec" value="15" min="3" max="120">s
+              &nbsp;|&nbsp;
+              Vàng <input type="number" id="inputAYellowSec" value="3" min="1" max="10">s
+            </div>
+          </div>
+          <div class="timed-input-row">
+            <span>Tuyến B:</span>
+            <div>
+              Xanh <input type="number" id="inputBGreenSec" value="15" min="3" max="120">s
+              &nbsp;|&nbsp;
+              Vàng <input type="number" id="inputBYellowSec" value="3" min="1" max="10">s
+            </div>
+          </div>
+          <button class="btn-outline" style="margin-top:2px; font-size:0.72rem; padding:3px; justify-content:center;" onclick="signalPanel.applyTimedConfig()">
+            Áp Dụng Chu Kỳ
+          </button>
+        </div>
+
+        <!-- Manual Hint -->
+        <div id="manualHintText" style="display:none; font-size:0.72rem; color:var(--text-muted); text-align:center; margin-bottom:0.4rem;">
+          👉 Bấm trực tiếp vào bóng đèn màu để chuyển pha (Bên này Xanh thì bên kia tự chuyển Đỏ).
+        </div>
+
+        <button id="manualAllRedButton" class="btn-outline" type="button" onclick="signalPanel.setPhase('ALL_RED')" style="display:none; margin:5px auto;" title="Bật cả hai đèn đỏ">Cả hai đỏ</button>
+
+        <!-- The Two Traffic Light Units Side-by-Side -->
+        <div id="trafficLightsContainer" class="traffic-lights-row">
+          
+          <!-- Route A Traffic Light -->
+          <div class="traffic-light-unit">
+            <span class="traffic-light-name">ĐƯỜNG A</span>
+            <div class="traffic-light-housing">
+              <div id="bulbA_red" class="light-bulb red" onclick="signalPanel.onBulbClick('A', 'red')">
+                <span id="bulbA_red_count"></span>
+              </div>
+              <div id="bulbA_yellow" class="light-bulb yellow" onclick="signalPanel.onBulbClick('A', 'yellow')">
+                <span id="bulbA_yellow_count"></span>
+              </div>
+              <div id="bulbA_green" class="light-bulb green active" onclick="signalPanel.onBulbClick('A', 'green')">
+                <span id="bulbA_green_count">15</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Route B Traffic Light -->
+          <div class="traffic-light-unit">
+            <span class="traffic-light-name">ĐƯỜNG B</span>
+            <div class="traffic-light-housing">
+              <div id="bulbB_red" class="light-bulb red active" onclick="signalPanel.onBulbClick('B', 'red')">
+                <span id="bulbB_red_count">18</span>
+              </div>
+              <div id="bulbB_yellow" class="light-bulb yellow" onclick="signalPanel.onBulbClick('B', 'yellow')">
+                <span id="bulbB_yellow_count"></span>
+              </div>
+              <div id="bulbB_green" class="light-bulb green" onclick="signalPanel.onBulbClick('B', 'green')">
+                <span id="bulbB_green_count"></span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Bottom Block: Latest Violation & Internal Scrollable History -->
+      <div class="violation-card">
+        <div class="panel-header" style="margin-bottom:0.4rem;">
+          <span class="panel-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+              <line x1="12" y1="9" x2="12" y2="13"/>
+              <line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+            XE VI PHẠM MỚI NHẤT
+          </span>
+          <span id="totalViolationsCount" style="font-size:0.75rem; font-weight:700; color:var(--color-primary);">0 Vi phạm</span>
+        </div>
+
+        <!-- Latest Violation Display Box (Phóng to xe vi phạm và có box) -->
+        <div class="latest-violation-box">
+          <div class="latest-crop-img-container">
+            <img id="latestViolationImg" src="" alt="Chưa có vi phạm" style="display:none;">
+            <span id="noViolationPlaceholder" style="font-size:0.7rem; color:var(--text-light); text-align:center; padding:4px;">Chưa phát hiện vi phạm</span>
+          </div>
+          <div class="latest-violation-info">
+            <span id="latestRuleBadge" class="violation-badge badge-red">CHỜ DỮ LIỆU</span>
+            <div style="font-weight:700; font-size:0.8rem; margin-top:2px;">
+              Xe: <span id="latestTrackId">--</span>
+            </div>
+            <div style="color:var(--text-muted); font-size:0.72rem;">
+              Thời điểm: <span id="latestTimestamp">--:--</span>
+            </div>
+            <div style="color:var(--text-body); font-size:0.72rem; line-height:1.2;" id="latestReason">
+              Hệ thống đang quan sát luồng giao thông...
+            </div>
+          </div>
+        </div>
+
+        <!-- History List Header -->
+        <div class="history-header">
+          <span>Lịch Sử Vi Phạm</span>
+          <span style="font-size:0.7rem; color:var(--text-light); font-weight:normal;">Bấm để xem ảnh & tua video</span>
+        </div>
+
+        <!-- Internal Scrollable History List (Does NOT extend page height) -->
+        <div id="violationHistoryList" class="history-scroll-container">
+          <div style="text-align:center; padding:1.5rem 0.5rem; color:var(--text-light); font-size:0.75rem;">
+            Chưa có vi phạm nào trong danh sách.
+          </div>
+        </div>
+
+      </div>
+
+    </aside>
+
+  </main>
+
+  <!-- Lightbox Modal for Full Evidence Viewing -->
+  <div id="evidenceLightboxModal" class="lightbox-modal" onclick="eventsManager.closeLightbox(event)">
+    <div class="lightbox-content" onclick="event.stopPropagation()">
+      <div class="lightbox-header">
+        <span id="lightboxTitle">Chi Tiết Bằng Chứng Vi Phạm</span>
+        <button style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:var(--text-muted);" onclick="eventsManager.closeLightbox()">&times;</button>
+      </div>
+      <div class="lightbox-body">
+        <img id="lightboxImg" src="" alt="Enlarged Evidence Image">
+        <div id="lightboxDetails" style="font-size:0.85rem; color:var(--text-body); text-align:center;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/static/js/player.js"></script>
+  <script src="/static/js/signal.js"></script>
+  <script src="/static/js/scene-geometry.js"></script>
+  <script src="/static/js/editor.js"></script>
+  <script src="/static/js/events.js"></script>
+  <script src="/static/js/app.js"></script>
+
+  <script>
+    function highlightToolBtn(btn) {
+      document.querySelectorAll('.editor-toolbar-row1 .tool-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    }
+  </script>
+</body>
+</html>

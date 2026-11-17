@@ -2,6 +2,8 @@
 
 Kiểm tra ngày 26/10/2026. Tài liệu nguồn nằm ở thư mục môn học `../../../` và bản bàn giao ở `../../IOT_Traffic_Monitoring_Project_Handoff.md`.
 
+**Cập nhật quyết định ngày 09/11/2026:** nhóm chọn **DroidCam trên điện thoại**, **Arduino Uno R3 qua USB Serial** cho sa bàn và **Django Web** làm màn hình giám sát; thử bằng MP4 trước. Phần “bản bàn giao” bên dưới ghi lại định hướng cũ để đối chiếu nguồn, không còn là quyết định hiện hành. Xem [kế hoạch hiện tại](VIDEO_FIRST_WEB_PLAN.md).
+
 ## Những điều bài giảng nêu trực tiếp
 
 | Nguồn | Nội dung đọc được | Tác động đến đồ án |
@@ -37,4 +39,4 @@ Không tìm thấy trong phần bài giảng đã kiểm tra một yêu cầu kh
 
 ## Điểm cần xác nhận trước khi chốt sản phẩm
 
-Deadline, số thành viên, rubric phần cứng/giao thức/Cloud/thời gian thực, model GoPro, khả năng laptop, kịch bản sa bàn và clip thử nghiệm. Các câu hỏi này không cản việc làm P0 trên MP4.
+Deadline, số thành viên, rubric phần cứng/giao thức/Cloud/thời gian thực, khả năng laptop, kịch bản sa bàn và clip thử nghiệm. Các câu hỏi này không cản việc làm P0 trên MP4.

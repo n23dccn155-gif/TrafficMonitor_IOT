@@ -1,0 +1,36 @@
+[
+  {
+    "event_id": "run20261105_seg0_trk17_red_light",
+    "tracking_run_id": "run_20261105_093319_774",
+    "rule_run_id": "rule_run_001",
+    "segment_id": "seg0",
+    "rule_type": "red_light",
+    "track_id": 17,
+    "vehicle_type": "motorcycle",
+    "event_timestamp_ms": 12000,
+    "bbox_xyxy": [479, 240, 498, 264],
+    "scene_config_version": 1,
+    "signal_source": "simulation",
+    "reason": "Xe ID 17 cắt vạch stop_A1 khi nhóm đèn A đang ĐỎ tại mốc 12000 ms",
+    "full_image_path": "/media/evidence/run20261105_seg0_trk17_red_light_full.jpg",
+    "crop_image_path": "/media/evidence/run20261105_seg0_trk17_red_light_crop.jpg",
+    "review_status": "pending"
+  },
+  {
+    "event_id": "run20261105_seg0_trk9_wrong_way",
+    "tracking_run_id": "run_20261105_093319_774",
+    "rule_run_id": "rule_run_001",
+    "segment_id": "seg0",
+    "rule_type": "wrong_way",
+    "track_id": 9,
+    "vehicle_type": "motorcycle",
+    "event_timestamp_ms": 4500,
+    "bbox_xyxy": [529, 255, 550, 290],
+    "scene_config_version": 1,
+    "signal_source": "simulation",
+    "reason": "Xe ID 9 di chuyển ngược hướng mũi tên vùng A1 qua 15 frame liên tiếp",
+    "full_image_path": "/media/evidence/run20261105_seg0_trk9_wrong_way_full.jpg",
+    "crop_image_path": "/media/evidence/run20261105_seg0_trk9_wrong_way_crop.jpg",
+    "review_status": "pending"
+  }
+]

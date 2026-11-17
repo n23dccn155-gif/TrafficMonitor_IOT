@@ -1,0 +1,72 @@
+{
+  "scene_id": "scene_vd3_v1",
+  "version": 1,
+  "source_id": "vd3.mp4",
+  "reference_frame_ms": 0,
+  "reference_size": [1912, 906],
+  "roads": {
+    "A": {
+      "name": "Đường A (Trục dọc)",
+      "signal_group": "A",
+      "center_boundary": [[950, 100], [960, 850]],
+      "direction_regions": [
+        {
+          "id": "A1",
+          "name": "A1 (Từ trên xuống)",
+          "polygon": [[800, 100], [950, 100], [960, 850], [800, 850]],
+          "allowed_direction": [0, 1]
+        },
+        {
+          "id": "A2",
+          "name": "A2 (Từ dưới lên)",
+          "polygon": [[950, 100], [1100, 100], [1120, 850], [960, 850]],
+          "allowed_direction": [0, -1]
+        }
+      ],
+      "stop_lines": [
+        {
+          "id": "stop_A1",
+          "direction_region_id": "A1",
+          "line": [[800, 300], [950, 300]]
+        },
+        {
+          "id": "stop_A2",
+          "direction_region_id": "A2",
+          "line": [[955, 600], [1110, 600]]
+        }
+      ]
+    },
+    "B": {
+      "name": "Đường B (Trục ngang)",
+      "signal_group": "B",
+      "center_boundary": [[100, 450], [1800, 460]],
+      "direction_regions": [
+        {
+          "id": "B1",
+          "name": "B1 (Từ trái sang phải)",
+          "polygon": [[100, 450], [1800, 460], [1800, 600], [100, 600]],
+          "allowed_direction": [1, 0]
+        },
+        {
+          "id": "B2",
+          "name": "B2 (Từ phải sang trái)",
+          "polygon": [[100, 300], [1800, 300], [1800, 450], [100, 450]],
+          "allowed_direction": [-1, 0]
+        }
+      ],
+      "stop_lines": [
+        {
+          "id": "stop_B1",
+          "direction_region_id": "B1",
+          "line": [[700, 455], [700, 600]]
+        },
+        {
+          "id": "stop_B2",
+          "direction_region_id": "B2",
+          "line": [[1200, 300], [1200, 445]]
+        }
+      ]
+    }
+  },
+  "intersection_polygon": [[700, 300], [1200, 300], [1200, 600], [700, 600]]
+}

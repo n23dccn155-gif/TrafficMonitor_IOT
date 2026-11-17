@@ -1,0 +1,8 @@
+# Requirements for TrafficMonitor Web & Backend
+django>=5.0
+pyserial>=3.5
+pytest>=8.0
+pytest-django>=4.8
+opencv-python>=4.10
+numpy>=1.26
+lapx>=0.9.4

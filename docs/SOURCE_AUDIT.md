@@ -2,6 +2,8 @@
 
 Kiểm tra trực tiếp trang nguồn ngày **26/10/2026**. Bảng này đánh giá mức hữu ích cho **đồ án hiện tại**, không xác nhận mã bên ngoài chạy được với TechGAR hoặc video của nhóm. Nguồn nào chưa rõ giấy phép thì chỉ đọc ý tưởng; không chép mã vào dự án.
 
+**Cập nhật 09/11/2026:** camera demo là điện thoại DroidCam; đèn sa bàn dự tính dùng Arduino Uno R3 qua USB Serial. Các nguồn GoPro/ESP32 bên dưới chỉ phản ánh giai đoạn khảo sát trước đó.
+
 ## Nguồn nên dùng
 
 | Nguồn | Đã kiểm chứng | Cách dùng |
@@ -9,8 +11,10 @@ Kiểm tra trực tiếp trang nguồn ngày **26/10/2026**. Bảng này đánh 
 | Mã TechGAR trong workspace riêng của tác giả (không có khi clone repo này) | Có `src/techgar/motion_tracker.py` với `MotionVehicleTracker.process_frame(frame, timestamp_s)` trả `(tracks, mask, expired_tracks)` và `active_tracks`; `TrackedVehicle` có ID, bbox, `cx/cy`, history. | Đã viết adapter một camera và thử 4 giây đầu `vd1.mp4`; baseline bỏ sót nhiều xe trên khung mẫu. Xem [báo cáo P0](P0_VD1_REPORT.md). |
 | [Ultralytics Track](https://docs.ultralytics.com/modes/track/) | Tài liệu chính thức mô tả tracking có ID và chọn tracker như ByteTrack. [Giấy phép Ultralytics](https://docs.ultralytics.com/help/contributing/) có điều kiện AGPL hoặc Enterprise. | YOLO hiện là hai lựa chọn 1 và 3 trong `menu.py`; vẫn cần đo trên video có nhãn trước khi kết luận chất lượng tracking. |
 | [Roboflow Supervision LineZone](https://supervision.roboflow.com/latest/detection/tools/line_zone/) và [PolygonZone](https://supervision.roboflow.com/latest/detection/tools/polygon_zone/) | Tài liệu chính thức có công cụ vùng/đếm đường, `LineZone` cần `tracker_id`; [Supervision](https://supervision.roboflow.com/latest/) ghi giấy phép MIT. | Tham khảo cách định nghĩa vùng/vạch; công cụ đếm qua vạch **không tự kết luận** vượt đèn đỏ hay lấn làn. Cài khi có nhu cầu thực sự. |
-| [Open GoPro](https://gopro.github.io/OpenGoPro/) | Tài liệu GoPro có bảng camera/firmware hỗ trợ và chức năng stream qua Wi-Fi/USB cho mẫu tương thích. | Chỉ dùng sau khi biết model/firmware GoPro của nhóm. P0 vẫn dùng MP4. |
-| [MQTT specification](https://mqtt.org/mqtt-specification/), [Mosquitto](https://mosquitto.org/documentation/) và [Paho Python](https://eclipse.dev/paho/files/paho.mqtt.python/html/) | Nguồn chính thức cho protocol, broker và Python client. Trang Paho được kiểm tra có ghi lưu ý về phiên bản API/callback, nên phải xem docs đúng phiên bản khi triển khai. | Dùng ở P2 để thực hiện luồng IoT và thử gửi lặp/mất kết nối; MQTT vẫn là đề xuất, chưa được giảng viên xác nhận là bắt buộc. |
+| [DroidCam Help](https://droidcam.app/help/) | Hướng dẫn chính thức cho URL luồng hình `http://<wifi-ip>:4747/video`; IP/cổng thực tế lấy từ app. | Nguồn hình live của bản demo; kiểm tra URL trên trình duyệt laptop trước khi dán vào `menu.py`. Chưa xác nhận độ trễ trên điện thoại của nhóm. |
+| [Arduino Uno Rev3 SMD pinout](https://docs.arduino.cc/resources/pinouts/A000073-full-pinout.pdf) | Pinout chính thức ghi mức 20 mA cho mỗi chân I/O. | Dùng để rà dòng của 2 nhánh LED/chân D2–D7; mỗi LED cần điện trở nối tiếp riêng, đề xuất 470 Ω trước khi đo linh kiện thực tế. Board CH340 trong danh sách là bản tương thích, cần kiểm tra đúng driver và chân khi nhận hàng. |
+| [Open GoPro](https://gopro.github.io/OpenGoPro/) | Tài liệu GoPro có bảng camera/firmware hỗ trợ và chức năng stream qua Wi-Fi/USB cho mẫu tương thích. | Nguồn khảo sát lịch sử; không dùng trong bản demo DroidCam hiện tại. |
+| [MQTT specification](https://mqtt.org/mqtt-specification/), [Mosquitto](https://mosquitto.org/documentation/) và [Paho Python](https://eclipse.dev/paho/files/paho.mqtt.python/html/) | Nguồn chính thức cho protocol, broker và Python client. Trang Paho được kiểm tra có ghi lưu ý về phiên bản API/callback, nên phải xem docs đúng phiên bản khi triển khai. | Chỉ dùng nếu cần mở rộng kênh IoT/Web ở P3; đường Arduino → laptop của demo dùng USB Serial. |
 
 ## Các repo được nêu trong bản bàn giao
 
@@ -21,7 +25,7 @@ Kiểm tra trực tiếp trang nguồn ngày **26/10/2026**. Bảng này đánh 
 | [Usmankhujaev/Wrong-direction-drivers-detection](https://github.com/Usmankhujaev/Wrong-direction-drivers-detection) | Repo tồn tại; bản gốc 2020 nằm trong `legacy/`, README nói bản hiện đại hóa 2026 dùng YOLO11/ByteTrack và quy tắc vùng vào/ra, hướng, hysteresis. Không thấy giấy phép rõ ở trang repo. | **Tham khảo thuật toán ngược chiều và cách cấu hình**, không chép code. Đây là nguồn cộng đồng sát P0 nhất, nhưng phải kiểm chứng trên clip nhóm. |
 | [AnujKumarC/Traffic_AI_Project](https://github.com/AnujKumarC/Traffic_AI_Project) | Repo tồn tại; README trình bày nhiều model, huấn luyện/dataset, OCR và Web; README tự ghi MIT. Quy mô vượt phạm vi P0 và không chứng minh các model phù hợp góc quay nhóm. | Tham khảo phân lớp module và báo cáo; chưa tải toàn bộ repo/model. |
 | [harisraja123/Real-Time-Traffic-Violation-Detection](https://github.com/harisraja123/Real-Time-Traffic-Violation-Detection) | Repo tồn tại; README có pipeline riêng cho đèn và lane crossing, dùng nhiều model/DeepSort; README ghi MIT nhưng cần kiểm tra file license trước khi sao chép. | Tham khảo phương pháp lane/line, không cài cả stack. |
-| [kyliew1/smart-traffic-light-dashboard](https://github.com/kyliew1/smart-traffic-light-dashboard) | Repo tồn tại; mô hình ESP32 + MQTT + dashboard 3D + điều khiển đèn; không thấy giấy phép rõ ở trang repo. | Tham khảo sơ đồ IoT/sa bàn ở P3, chưa chọn ESP32 hoặc dashboard 3D. |
+| [kyliew1/smart-traffic-light-dashboard](https://github.com/kyliew1/smart-traffic-light-dashboard) | Repo tồn tại; mô hình ESP32 + MQTT + dashboard 3D + điều khiển đèn; không thấy giấy phép rõ ở trang repo. | Chỉ tham khảo lịch sử; nhóm đã chọn Arduino Uno R3 và USB Serial cho sa bàn. |
 | [som3a-web/signalwatch-traffic-detection](https://github.com/som3a-web/signalwatch-traffic-detection) | Repo tồn tại; README mô tả Web cấu hình vùng/vạch, bằng chứng và trạng thái review, nhưng repo rất mới và không thấy giấy phép rõ. | Tham khảo UX hiệu chỉnh camera và quản lý sự kiện ở P2; chưa dùng mã. |
 
 ## Video, dataset và bài báo

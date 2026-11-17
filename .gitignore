@@ -15,3 +15,17 @@ weights/*
 !weights/.gitkeep
 references/papers/*.pdf
 *.log
+
+# Database & Web artifacts
+*.sqlite3
+db.sqlite3
+web/static/fixtures/*
+outputs/media/*
+!outputs/media/.gitkeep
+
+# Local agent tooling (không thuộc mã nguồn hệ thống)
+.opencode/
+launch_subagent_*.cmd
+launch_all_subagents.*
+docs/SUBAGENT_IMPLEMENTATION_PROMPT.md
+docs/tasks/

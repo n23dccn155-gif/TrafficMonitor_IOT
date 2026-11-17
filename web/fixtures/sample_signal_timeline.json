@@ -1,0 +1,14 @@
+{
+  "timeline_id": "timeline_vd3_v1",
+  "version": 1,
+  "video_id": "vd3.mp4",
+  "mode": "simulation",
+  "changes": [
+    {"at_video_ms": 0, "phase": "A_GREEN", "source": "simulation", "seq": 1},
+    {"at_video_ms": 10000, "phase": "A_YELLOW", "source": "simulation", "seq": 2},
+    {"at_video_ms": 13000, "phase": "ALL_RED", "source": "simulation", "seq": 3},
+    {"at_video_ms": 15000, "phase": "B_GREEN", "source": "simulation", "seq": 4},
+    {"at_video_ms": 25000, "phase": "B_YELLOW", "source": "simulation", "seq": 5},
+    {"at_video_ms": 28000, "phase": "ALL_RED", "source": "simulation", "seq": 6}
+  ]
+}

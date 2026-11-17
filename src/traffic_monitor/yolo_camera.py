@@ -67,6 +67,12 @@ def main() -> None:
         raise SystemExit("Could not read a frame from the video source")
     width = min(args.width, source_width)
     height = round(source_height * width / source_width)
+    # MP4 encoding rounds odd dimensions down. Keep frames, JSONL and video aligned.
+    width -= width % 2
+    height -= height % 2
+    if width < 2 or height < 2:
+        capture.release()
+        raise SystemExit("Video dimensions are too small")
     args.output.mkdir(parents=True, exist_ok=True)
     writer = None
     if args.save_video:

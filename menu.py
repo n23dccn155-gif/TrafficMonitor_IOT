@@ -124,8 +124,10 @@ def select_source(cfg: dict) -> str | None:
         elif source_type == "2":
             last_url = cfg.get("last_droidcam_url", DEFAULT_DROIDCAM_URL)
             print("\n--- Nhập link DroidCam Live ---")
+            print("Điện thoại và laptop cần cùng Wi-Fi. Thử URL /video trên trình duyệt trước.")
+            print("Ví dụ: http://192.168.1.20:4747/video (dùng IP/cổng app DroidCam hiển thị)")
             print(f"Link hiện tại: {last_url}")
-            user_url = input("Nhấn Enter để dùng link trên, hoặc dán link DroidCam mới (0 để quay lại): ").strip()
+            user_url = input("Nhấn Enter để dùng link trên, hoặc dán link DroidCam mới (0 để quay lại): ").strip().strip('"').strip("'")
 
             if user_url == "0":
                 continue
