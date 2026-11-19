@@ -5,7 +5,7 @@ import datetime
 import os
 import threading
 import time
-from collections import defaultdict, deque
+from pathlib import Path
 
 import cv2
 from django.conf import settings
@@ -19,6 +19,12 @@ from src.traffic_monitor.traffic_rules.schemas import SceneConfig, SignalChange,
 from ..models import RuleRunRecord, SceneConfigRecord, ViolationEventRecord
 from .droidcam_service import DroidCamManager
 from .arduino_signal_service import ArduinoSignalService
+from .input_optimizer import (
+    TrackFilter, box_to_frame, point_in_roi, roi_rect, scene_polygons, yolo_input_size,
+)
+
+TRACKER_CONFIG = str(Path(__file__).with_name("bytetrack_live.yaml"))
+DETECT_CONF = 0.1  # thấp để ByteTrack có box cho bước ghép thứ hai; lọc thật ở TrackFilter
 
 
 def is_usable_vehicle_box(bbox: list[int], frame_width: int, frame_height: int) -> bool:
@@ -163,8 +169,10 @@ class LiveProcessingManager:
             scene = SceneConfig.from_dict(scene_record.to_dict())
             engine = RuleEngine(scene, timeline, rule_run_id=run_id)
             run_record = RuleRunRecord.objects.create(rule_run_id=run_id, scene_config=scene_record)
-            history = defaultdict(lambda: deque(maxlen=60))
+            track_filter = TrackFilter()
+            roi_cache = {}  # kích thước frame -> (polygons, rect); camera có thể đổi độ phân giải khi nối lại
             start_ms = self._start_monotonic_ms
+            last_timestamp_ms = 0
             last_camera_timestamp = 0
             frame_index = 0
             model_reset = False
@@ -194,24 +202,35 @@ class LiveProcessingManager:
                     continue
                 if last_camera_timestamp and camera_timestamp - last_camera_timestamp > 3000:
                     # A reconnect starts a fresh local-ID space and rule segment.
-                    history.clear()
+                    track_filter.clear()
                     model_reset = False
                     segment_index += 1
                 last_camera_timestamp = camera_timestamp
-                timestamp_ms = max(0, int(time.monotonic() * 1000) - start_ms)
+                # Mốc của frame là lúc camera nhận ảnh (trừ đi tuổi của frame), cùng đồng hồ
+                # monotonic với các lần đổi pha đèn; không dùng lúc YOLO xử lý xong.
+                frame_age_ms = max(0, int(time.time() * 1000) - camera_timestamp)
+                timestamp_ms = max(last_timestamp_ms, int(time.monotonic() * 1000) - frame_age_ms - start_ms, 0)
+                last_timestamp_ms = timestamp_ms
+                track_filter.next_frame()
                 source_h, source_w = source_frame.shape[:2]
                 processing_size = [source_w, source_h]
                 width, height = processing_size
+                if (width, height) not in roi_cache:
+                    polygons = scene_polygons(scene, processing_size)
+                    roi_cache[(width, height)] = (polygons, roi_rect(polygons, processing_size))
+                roi_polygons, roi = roi_cache[(width, height)]
                 yolo_tracks = []
                 yolo_detections = []
                 raw_box_count = 0
                 without_track_id = 0
                 rejected_box_count = 0
+                unconfirmed_count = 0
                 if self._model_ready.is_set() and isinstance(self._model, tuple):
                     model, device = self._model
-                    yolo_width = min(960, source_w)
-                    yolo_height = max(2, round(source_h * yolo_width / source_w))
-                    yolo_frame = cv2.resize(source_frame, (yolo_width, yolo_height))
+                    rx1, ry1, rx2, ry2 = roi
+                    yolo_size = yolo_input_size(rx2 - rx1, ry2 - ry1)
+                    yolo_width, yolo_height = yolo_size
+                    yolo_frame = cv2.resize(source_frame[ry1:ry2, rx1:rx2], yolo_size, interpolation=cv2.INTER_AREA)
                     try:
                         with self._model_lock:
                             if stop_event.is_set():
@@ -221,8 +240,8 @@ class LiveProcessingManager:
                                     tracker.reset()
                                 model_reset = True
                             result = model.track(
-                                yolo_frame, persist=True, tracker="bytetrack.yaml", classes=[2, 3, 5, 7],
-                                conf=0.15, imgsz=960, device=device, verbose=False,
+                                yolo_frame, persist=True, tracker=TRACKER_CONFIG, classes=[2, 3, 5, 7],
+                                conf=DETECT_CONF, imgsz=960, agnostic_nms=True, device=device, verbose=False,
                             )[0]
                         boxes = result.boxes
                         raw_box_count = len(boxes) if boxes is not None else 0
@@ -233,28 +252,38 @@ class LiveProcessingManager:
                                 if not is_usable_vehicle_box(yolo_box, yolo_width, yolo_height):
                                     rejected_box_count += 1
                                     continue
-                                mapped_box = scale_bbox(yolo_box, [yolo_width, yolo_height], processing_size)
-                                vehicle_type = result.names[int(box.cls.item())]
-                                confidence = float(box.conf.item())
-                                if box.id is None or confidence < 0.30:
-                                    yolo_detections.append({
-                                        "vehicle_type": vehicle_type,
-                                        "class_confidence": confidence,
-                                        "bbox_xyxy": mapped_box,
-                                    })
-                                    continue
-                                track_id = int(box.id.item())
+                                mapped_box = box_to_frame(yolo_box, yolo_size, roi)
                                 x1, y1, x2, y2 = mapped_box
                                 point = [(x1 + x2) // 2, y2]
-                                history[track_id].append(point)
-                                yolo_tracks.append({
-                                    "track_id": track_id,
-                                    "track_source": "yolo",
+                                if not point_in_roi(point, roi_polygons):
+                                    # Chân xe ngoài mọi vùng hướng/nút giao (vỉa hè, nhà...).
+                                    rejected_box_count += 1
+                                    continue
+                                vehicle_type = result.names[int(box.cls.item())]
+                                confidence = float(box.conf.item())
+                                detection = {
                                     "vehicle_type": vehicle_type,
                                     "class_confidence": confidence,
                                     "bbox_xyxy": mapped_box,
-                                    "ground_point_xy": point,
-                                    "trajectory_xy": list(history[track_id]),
+                                }
+                                if box.id is None:
+                                    yolo_detections.append(detection)
+                                    continue
+                                track_id = int(box.id.item())
+                                state = track_filter.update(track_id, vehicle_type, point)
+                                if not state["confirmed"]:
+                                    # Track mới chớp tắt: chỉ hiển thị, chưa xét luật.
+                                    unconfirmed_count += 1
+                                    yolo_detections.append(detection)
+                                    continue
+                                yolo_tracks.append({
+                                    "track_id": track_id,
+                                    "track_source": "yolo",
+                                    "vehicle_type": state["vehicle_type"],
+                                    "class_confidence": confidence,
+                                    "bbox_xyxy": mapped_box,
+                                    "ground_point_xy": state["ground_point_xy"],
+                                    "trajectory_xy": state["trajectory_xy"],
                                     "observation_kind": "detection",
                                 })
                     except Exception as exc:
@@ -265,12 +294,14 @@ class LiveProcessingManager:
                     "camera_id": "CAM_01", "frame_index": frame_index,
                     "segment_id": f"seg{segment_index}",
                     "video_timestamp_ms": timestamp_ms, "processing_size": [width, height],
+                    "roi_xyxy": list(roi),
                     "tracks": tracks,
                     "yolo_detections": yolo_detections,
                     "detection_stats": {
                         "raw_boxes": raw_box_count,
                         "without_track_id": without_track_id,
                         "rejected_boxes": rejected_box_count,
+                        "unconfirmed_tracks": unconfirmed_count,
                         "motion_tracks": 0,
                         "yolo_tracks": len(yolo_tracks),
                         "yolo_detections": len(yolo_detections),
