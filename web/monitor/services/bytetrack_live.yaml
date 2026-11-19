@@ -1,0 +1,10 @@
+# ByteTrack cho camera trực tiếp. YOLO chạy conf=0.1 để box điểm thấp
+# (xe bị che, mờ, ở xa) vào được bước ghép thứ hai; chỉ box >= new_track_thresh
+# mới tạo track mới, nên box điểm thấp chỉ nối dài track đã có.
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.3
+track_buffer: 60
+match_thresh: 0.8
+fuse_score: True

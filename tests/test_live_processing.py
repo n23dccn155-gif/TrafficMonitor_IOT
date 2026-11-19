@@ -347,7 +347,9 @@ def test_live_vehicle_crossing_red_line_saves_current_frame_evidence(tmp_path):
                 time.sleep(0.05)
             assert event is not None, manager.get_status()
             assert event.track_id == 42
-            assert event.bbox_xyxy == [100, 230, 150, 270]
+            # Track được xét từ frame thứ 3 và điểm chân là trung bình 3 frame,
+            # nên lần cắt vạch y=260 rơi vào frame 5 (box đáy y=290).
+            assert event.bbox_xyxy == [100, 250, 150, 290]
             assert (tmp_path / "evidence" / f"{event.event_id}_full.jpg").is_file()
             assert (tmp_path / "evidence" / f"{event.event_id}_crop.jpg").is_file()
             assert fake_model.calls >= 4
