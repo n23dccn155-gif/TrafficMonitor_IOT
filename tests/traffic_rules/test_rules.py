@@ -22,10 +22,7 @@ from src.traffic_monitor.traffic_rules.schemas import (
     TrackFrame,
     TrackObservation,
 )
-from src.traffic_monitor.traffic_rules.signal_controller import (
-    FakeSerialAdapter,
-    TimelineGenerator,
-)
+from src.traffic_monitor.traffic_rules.signal_controller import TimelineGenerator
 
 
 @pytest.fixture
@@ -454,39 +451,30 @@ def test_green_crossing_one_line_does_not_hide_later_red_crossing(sample_scene, 
 
 
 def test_timeline_generator_never_concurrent_green():
-    """Verify TimelineGenerator strict invariant: A_GREEN and B_GREEN NEVER overlap."""
-    timeline = TimelineGenerator.generate_timed(
-        duration_ms=60000,
-        a_green_sec=5.0,
-        b_green_sec=5.0,
-        yellow_sec=2.0,
-        all_red_sec=1.0,
-    )
-
-    # Check every second across 60 seconds
-    for t_ms in range(0, 60000, 500):
-        phase = timeline.get_phase_at(t_ms)
-        assert phase in ("A_GREEN", "A_YELLOW", "ALL_RED", "B_GREEN", "B_YELLOW")
-        # Ensure phase is a single atomic state
-        assert not (phase == "A_GREEN" and phase == "B_GREEN")
+    """Every change of direction passes own yellow then ALL_RED for 3 s (default)."""
+    timeline = TimelineGenerator.generate_timed(duration_ms=120000)
+    phases = [c.phase for c in timeline.changes]
+    assert phases[:7] == ["A_GREEN", "A_YELLOW", "ALL_RED", "B_GREEN", "B_YELLOW", "ALL_RED", "A_GREEN"]
+    for prev, cur in zip(timeline.changes, timeline.changes[1:]):
+        if cur.phase.endswith("_GREEN"):
+            assert prev.phase == "ALL_RED"
+            assert cur.at_video_ms - prev.at_video_ms == 3000
+    for t_ms in range(0, 120000, 500):
+        assert timeline.get_phase_at(t_ms) in ("A_GREEN", "A_YELLOW", "ALL_RED", "B_GREEN", "B_YELLOW")
 
 
-def test_fake_serial_adapter():
-    adapter = FakeSerialAdapter()
-    assert adapter.is_connected() is True
-
-    ack = adapter.send_phase("A_GREEN", command_id=1)
-    assert ack["status"] == "ACK"
-    assert ack["phase"] == "A_GREEN"
-    assert ack["command_id"] == 1
-    assert ack["seq"] == 1
-
-    # Bad phase rejection
-    bad_ack = adapter.send_phase("INVALID_PHASE", command_id=2)
-    assert bad_ack["status"] == "REJECTED"
-
-    # Disconnected adapter
-    disconnected_adapter = FakeSerialAdapter(simulate_disconnect=True)
-    assert disconnected_adapter.is_connected() is False
-    err_ack = disconnected_adapter.send_phase("A_GREEN", command_id=3)
-    assert err_ack["status"] == "ERROR"
+@pytest.mark.parametrize("current, group, expected", [
+    ("A_GREEN", "B", [("A_YELLOW", 1000), ("ALL_RED", 4000), ("B_GREEN", 7000)]),
+    ("A_YELLOW", "B", [("ALL_RED", 1000), ("B_GREEN", 4000)]),
+    ("ALL_YELLOW", "A", [("ALL_RED", 1000), ("A_GREEN", 4000)]),
+    ("ALL_RED", "A", [("A_GREEN", 1000)]),
+    ("B_GREEN", "B", []),
+    ("B_GREEN", "ALL_RED", [("B_YELLOW", 1000), ("ALL_RED", 4000)]),
+    ("UNKNOWN", "B", [("ALL_RED", 1000), ("B_GREEN", 4000)]),
+    (None, "A", [("ALL_RED", 1000), ("A_GREEN", 4000)]),
+    ("A_YELLOW", "A", [("A_GREEN", 1000)]),
+])
+def test_manual_transition_uses_yellow_and_all_red(current, group, expected):
+    changes = TimelineGenerator.create_manual_transition(current, group, at_video_ms=1000, start_seq=5)
+    assert [(c.phase, c.at_video_ms) for c in changes] == expected
+    assert [c.seq for c in changes] == list(range(5, 5 + len(expected)))

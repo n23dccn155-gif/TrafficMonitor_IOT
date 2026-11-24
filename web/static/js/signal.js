@@ -4,7 +4,11 @@
  * 1. Timed Mode (Tự động theo giây): Configurable A/B green & yellow durations with live countdown.
  * 2. Manual Mode (Chuyển thủ công): Direct clicking on bulbs with glowing white border highlight and safe interlocking.
  *    Clicking the yellow bulb on both roads (ALL_YELLOW) shows both directions yellow at once.
+ * Same safety rule as the Uno firmware: handing right of way to the other road always runs
+ * own yellow -> ALL_RED (ALL_RED_SEC) -> target, so both roads are never green together.
  */
+const ALL_RED_SEC = 3;
+
 class SignalPanel {
   constructor() {
     this.mode = "timed"; // "timed" or "manual"
@@ -21,6 +25,13 @@ class SignalPanel {
     // Timer state
     this.cycleTimer = null;
     this.remainingSec = 15;
+    this.cycleIndex = 0;
+    // Road that last had right of way; tells which road an ALL_RED leads to. "B" so the
+    // first ALL_RED (Uno start-up, cycle start) leads to A, like the firmware.
+    this.lastGroup = "B";
+    this.transitionTimer = null;
+    this.transitionSteps = [];
+    this.phaseStartedAt = Date.now(); // Simulation clock for minimum yellow/ALL_RED times.
     this.manualChanges = [{ at_video_ms: 0, phase: "A_GREEN", seq: 1 }];
     this.hardwareEnabled = false;
     this.hardwarePoll = null;
@@ -53,6 +64,8 @@ class SignalPanel {
   }
 
   setMode(mode) {
+    // Re-clicking the active tab must not cancel a manual transition (it would stall in ALL_RED).
+    if (mode === this.mode) return;
     this.mode = mode;
     const container = document.getElementById("trafficLightsContainer");
     const allRedButton = document.getElementById("manualAllRedButton");
@@ -63,6 +76,7 @@ class SignalPanel {
       this.timedInputsBox.style.display = "flex";
       this.manualHintText.style.display = "none";
       if (container) container.classList.remove("mode-manual");
+      if (!this.hardwareEnabled) this._restartCycle();
       this.startTimedCycle();
       if (this.hardwareEnabled) this.sendHardwareAuto().catch((e) => this.showHardwareStatus(`Lỗi Arduino: ${e.message}`));
     } else {
@@ -96,9 +110,21 @@ class SignalPanel {
       return;
     }
     if (this.mode === "timed") {
-      this.setPhase("A_GREEN", this.aGreenSec);
+      this._restartCycle();
       this.startTimedCycle();
     }
+  }
+
+  /**
+   * (Re)start the timed cycle from the current phase without skipping safety steps, like the
+   * Uno's AUTO command: a green of B first shows B yellow, anything unsafe restarts at the
+   * ALL_RED before A. A_GREEN (also the initial state) simply restarts its green.
+   */
+  _restartCycle() {
+    const entry = { A_GREEN: 0, A_YELLOW: 1, B_GREEN: 4, B_YELLOW: 4 }[this.currentPhase] ?? 5;
+    this.cycleIndex = entry;
+    const [phase, sec] = this._cycle()[entry];
+    this.setPhase(phase, sec);
   }
 
   syncToVideoTime(seconds) {
@@ -113,21 +139,29 @@ class SignalPanel {
       }
       return;
     }
-    const phases = [
-      ["A_GREEN", this.aGreenSec], ["A_YELLOW", this.aYellowSec],
-      ["B_GREEN", this.bGreenSec], ["B_YELLOW", this.bYellowSec],
-    ];
+    const phases = this._cycle();
     const cycle = phases.reduce((sum, item) => sum + item[1], 0);
     let elapsed = Math.max(0, seconds) % cycle;
-    for (const [phase, duration] of phases) {
+    for (const [index, [phase, duration]] of phases.entries()) {
       if (elapsed < duration) {
+        this.cycleIndex = index;
         this.currentPhase = phase;
+        this.phaseStartedAt = Date.now() - elapsed * 1000;
+        if (phase === "ALL_RED") this.lastGroup = index === 2 ? "A" : "B";
         this.remainingSec = Math.ceil(duration - elapsed);
         this._renderBulbs();
         return;
       }
       elapsed -= duration;
     }
+  }
+
+  /** One timed cycle as [phase, seconds]; ALL_RED appears twice (after A and after B). */
+  _cycle() {
+    return [
+      ["A_GREEN", this.aGreenSec], ["A_YELLOW", this.aYellowSec], ["ALL_RED", ALL_RED_SEC],
+      ["B_GREEN", this.bGreenSec], ["B_YELLOW", this.bYellowSec], ["ALL_RED", ALL_RED_SEC],
+    ];
   }
 
   startTimedCycle() {
@@ -148,24 +182,85 @@ class SignalPanel {
       clearInterval(this.cycleTimer);
       this.cycleTimer = null;
     }
+    clearTimeout(this.transitionTimer);
+    this.transitionTimer = null;
+    this.transitionSteps = [];
   }
 
   _advanceToNextPhase() {
-    switch (this.currentPhase) {
-      case "A_GREEN":
-        this.setPhase("A_YELLOW", this.aYellowSec);
-        break;
-      case "A_YELLOW":
-        this.setPhase("B_GREEN", this.bGreenSec);
-        break;
-      case "B_GREEN":
-        this.setPhase("B_YELLOW", this.bYellowSec);
-        break;
-      case "B_YELLOW":
-      default:
-        this.setPhase("A_GREEN", this.aGreenSec);
-        break;
+    const cycle = this._cycle();
+    let index = this.cycleIndex;
+    if (cycle[index][0] !== this.currentPhase) {
+      // Phase was changed outside the cycle (manual, hardware): resync by name.
+      index = this.currentPhase === "ALL_RED"
+        ? (this.lastGroup === "B" ? 5 : 2)
+        : cycle.findIndex(([phase]) => phase === this.currentPhase);
+      if (index < 0) index = 4; // ALL_YELLOW/UNKNOWN: next step is a full ALL_RED clearance.
     }
+    this.cycleIndex = (index + 1) % cycle.length;
+    const [phase, sec] = cycle[this.cycleIndex];
+    this.setPhase(phase, sec);
+  }
+
+  /**
+   * Safe steps from one phase to another, as [phase, seconds] with the target last (seconds null).
+   * A change that gives right of way to the other road first shows the current road's yellow,
+   * then ALL_RED for ALL_RED_SEC. Mirrors requestPhase() in arduino/traffic_signal/traffic_signal.ino.
+   */
+  _safeSequence(from, to) {
+    const groupOf = (phase) => (/^[AB]_/.test(phase) ? phase[0] : null);
+    const fromGroup = groupOf(from);
+    const toGroup = groupOf(to);
+    // Other road's phase -> conflict; ALL_YELLOW/UNKNOWN -> green also needs a clearance.
+    const conflict = (fromGroup && toGroup && fromGroup !== toGroup)
+      || (!fromGroup && from !== "ALL_RED" && to.endsWith("_GREEN"));
+    const steps = [];
+    if (conflict || (to === "ALL_RED" && from.endsWith("_GREEN"))) {
+      if (from.endsWith("_GREEN")) {
+        steps.push([`${fromGroup}_YELLOW`, fromGroup === "A" ? this.aYellowSec : this.bYellowSec]);
+      }
+      if (to !== "ALL_RED") steps.push(["ALL_RED", ALL_RED_SEC]);
+    }
+    steps.push([to, null]);
+    return steps;
+  }
+
+  /** Manual request: the Uno runs the safe sequence itself; the web simulation runs it with timers. */
+  requestPhase(target) {
+    if (this.hardwareEnabled) {
+      this.setPhase(target);
+      return;
+    }
+    // Always recompute from the phase actually shown, so a new click never skips a step.
+    clearTimeout(this.transitionTimer);
+    this.transitionTimer = null;
+    this.transitionSteps = this._safeSequence(this.currentPhase, target);
+    const waitSec = this._protectedRemainingSec(this.transitionSteps[0][0]);
+    if (waitSec > 0) this.transitionTimer = setTimeout(() => this._runTransitionStep(), waitSec * 1000);
+    else this._runTransitionStep();
+  }
+
+  /**
+   * Seconds the current phase must still show before moving to `next`: an ALL_RED always
+   * lasts ALL_RED_SEC and a yellow runs to its end before ALL_RED. Same rule as the firmware
+   * (time-based, so it holds however the phase was entered: timed cycle, video seek, manual).
+   */
+  _protectedRemainingSec(next) {
+    const phase = this.currentPhase;
+    let minSec = 0;
+    if (phase === "ALL_RED" && next !== "ALL_RED") minSec = ALL_RED_SEC;
+    else if (/^[AB]_YELLOW$/.test(phase) && next === "ALL_RED") {
+      minSec = phase[0] === "A" ? this.aYellowSec : this.bYellowSec;
+    }
+    return Math.max(0, minSec - (Date.now() - this.phaseStartedAt) / 1000);
+  }
+
+  _runTransitionStep() {
+    const [phase, sec] = this.transitionSteps.shift();
+    this.setPhase(phase);
+    this.transitionTimer = this.transitionSteps.length
+      ? setTimeout(() => this._runTransitionStep(), sec * 1000)
+      : null;
   }
 
   setPhase(phase, durationSec = null) {
@@ -173,12 +268,17 @@ class SignalPanel {
       if (this.mode === "manual") {
         // Update locally right away so fast clicks chain (e.g. A yellow then B yellow
         // becomes ALL_YELLOW); the Uno reply overwrites this with the real state.
-        this.currentPhase = phase;
-        this._renderBulbs();
+        // Never for a green: the Uno may first run yellow/ALL_RED (or finish a clearance),
+        // so a green is shown only once the Uno reports it.
+        if (!phase.endsWith("_GREEN") && this._safeSequence(this.currentPhase, phase).length === 1) {
+          this.currentPhase = phase;
+          this._renderBulbs();
+        }
         this.hardwareRequest({ action: "manual", phase }).catch(() => {});
       }
       return;
     }
+    if (phase !== this.currentPhase) this.phaseStartedAt = Date.now();
     this.currentPhase = phase;
     if (typeof app !== "undefined" && app) app.onSignalPhaseChanged(phase);
     if (durationSec !== null) {
@@ -193,27 +293,27 @@ class SignalPanel {
       return;
     }
 
-    // Manual switching logic with strict safety: Never A and B green concurrently
+    // Every click goes through requestPhase(), which inserts yellow/ALL_RED when needed.
     if (road === "A") {
       if (color === "green") {
-        this.setPhase("A_GREEN");
+        this.requestPhase("A_GREEN");
       } else if (color === "yellow") {
         // Yellow on both roads: B already yellow => BOTH_YELLOW; again => back to B only.
-        if (this.currentPhase === "ALL_YELLOW") this.setPhase("B_YELLOW");
-        else this.setPhase(this.currentPhase === "B_YELLOW" ? "ALL_YELLOW" : "A_YELLOW");
+        if (this.currentPhase === "ALL_YELLOW") this.requestPhase("B_YELLOW");
+        else this.requestPhase(this.currentPhase === "B_YELLOW" ? "ALL_YELLOW" : "A_YELLOW");
       } else if (color === "red") {
-        // Switching A to Red safely gives green to B
-        this.setPhase("B_GREEN");
+        // A to red hands right of way to B (via yellow + ALL_RED)
+        this.requestPhase("B_GREEN");
       }
     } else if (road === "B") {
       if (color === "green") {
-        this.setPhase("B_GREEN");
+        this.requestPhase("B_GREEN");
       } else if (color === "yellow") {
-        if (this.currentPhase === "ALL_YELLOW") this.setPhase("A_YELLOW");
-        else this.setPhase(this.currentPhase === "A_YELLOW" ? "ALL_YELLOW" : "B_YELLOW");
+        if (this.currentPhase === "ALL_YELLOW") this.requestPhase("A_YELLOW");
+        else this.requestPhase(this.currentPhase === "A_YELLOW" ? "ALL_YELLOW" : "B_YELLOW");
       } else if (color === "red") {
-        // Switching B to Red safely gives green to A
-        this.setPhase("A_GREEN");
+        // B to red hands right of way to A (via yellow + ALL_RED)
+        this.requestPhase("A_GREEN");
       }
     }
   }
@@ -233,6 +333,8 @@ class SignalPanel {
 
     const isTimed = this.mode === "timed";
     const secStr = isTimed ? String(this.remainingSec) : "";
+    const rem = this.remainingSec;
+    if (/^[AB]_/.test(this.currentPhase)) this.lastGroup = this.currentPhase[0];
 
     switch (this.currentPhase) {
       case "A_GREEN":
@@ -242,7 +344,7 @@ class SignalPanel {
         }
         if (this.bulbBRed) {
           this.bulbBRed.classList.add("active");
-          if (this.countBRed) this.countBRed.textContent = isTimed ? String(this.remainingSec + this.aYellowSec + (this.hardwareEnabled ? 1 : 0)) : "";
+          if (this.countBRed) this.countBRed.textContent = isTimed ? String(rem + this.aYellowSec + ALL_RED_SEC) : "";
         }
         break;
 
@@ -253,7 +355,7 @@ class SignalPanel {
         }
         if (this.bulbBRed) {
           this.bulbBRed.classList.add("active");
-          if (this.countBRed) this.countBRed.textContent = isTimed && this.hardwareEnabled ? String(this.remainingSec + 1) : secStr;
+          if (this.countBRed) this.countBRed.textContent = isTimed ? String(rem + ALL_RED_SEC) : "";
         }
         break;
 
@@ -264,7 +366,7 @@ class SignalPanel {
         }
         if (this.bulbARed) {
           this.bulbARed.classList.add("active");
-          if (this.countARed) this.countARed.textContent = isTimed ? String(this.remainingSec + this.bYellowSec + (this.hardwareEnabled ? 1 : 0)) : "";
+          if (this.countARed) this.countARed.textContent = isTimed ? String(rem + this.bYellowSec + ALL_RED_SEC) : "";
         }
         break;
 
@@ -275,7 +377,7 @@ class SignalPanel {
         }
         if (this.bulbARed) {
           this.bulbARed.classList.add("active");
-          if (this.countARed) this.countARed.textContent = isTimed && this.hardwareEnabled ? String(this.remainingSec + 1) : secStr;
+          if (this.countARed) this.countARed.textContent = isTimed ? String(rem + ALL_RED_SEC) : "";
         }
         break;
       case "ALL_YELLOW":
@@ -287,14 +389,19 @@ class SignalPanel {
         }
         break;
 
-      case "ALL_RED":
+      case "ALL_RED": {
         if (this.bulbARed) this.bulbARed.classList.add("active");
         if (this.bulbBRed) this.bulbBRed.classList.add("active");
-        if (isTimed && this.remainingSec > 0) {
-          if (this.countARed) this.countARed.textContent = secStr;
-          if (this.countBRed) this.countBRed.textContent = secStr;
+        if (isTimed && rem > 0) {
+          // The road that did not go last turns green next; the other waits a full extra phase.
+          const nextIsA = this.lastGroup === "B";
+          const waitOther = rem + ALL_RED_SEC + (nextIsA
+            ? this.aGreenSec + this.aYellowSec : this.bGreenSec + this.bYellowSec);
+          if (this.countARed) this.countARed.textContent = String(nextIsA ? rem : waitOther);
+          if (this.countBRed) this.countBRed.textContent = String(nextIsA ? waitOther : rem);
         }
         break;
+      }
     }
 
     if (this.phaseBadge) {
@@ -333,6 +440,8 @@ class SignalPanel {
     }
     const port = document.getElementById("arduinoPort")?.value?.trim()?.toUpperCase();
     const desiredMode = this.mode;
+    // A web-simulated manual change may be mid-way: hand its final target to the Uno.
+    const manualTarget = this.transitionSteps.at(-1)?.[0] || this.currentPhase;
     const desiredTiming = {
       action: "auto", a_green: this.aGreenSec, a_yellow: this.aYellowSec,
       b_green: this.bGreenSec, b_yellow: this.bYellowSec,
@@ -344,7 +453,7 @@ class SignalPanel {
       this.stopTimedCycle();
       document.getElementById("arduinoConnectButton").textContent = "Ngắt kết nối";
       if (desiredMode === "timed") await this.hardwareRequest(desiredTiming);
-      else await this.hardwareRequest({ action: "manual", phase: this.currentPhase });
+      else await this.hardwareRequest({ action: "manual", phase: manualTarget });
       this.hardwarePoll = setInterval(() => this.pollHardware(), 500);
     } catch (e) {
       this.hardwareEnabled = false;
@@ -440,15 +549,12 @@ class SignalPanel {
 
       const durationMs = typeof app !== "undefined" && app?.player?.video?.duration
         ? Math.ceil(app.player.video.duration * 1000) : 300000;
+      const cycle = this._cycle();
       while (this.mode === "timed" && t < Math.max(300000, durationMs)) {
-        changes.push({ at_video_ms: t, phase: "A_GREEN", seq: seq++ });
-        t += this.aGreenSec * 1000;
-        changes.push({ at_video_ms: t, phase: "A_YELLOW", seq: seq++ });
-        t += this.aYellowSec * 1000;
-        changes.push({ at_video_ms: t, phase: "B_GREEN", seq: seq++ });
-        t += this.bGreenSec * 1000;
-        changes.push({ at_video_ms: t, phase: "B_YELLOW", seq: seq++ });
-        t += this.bYellowSec * 1000;
+        for (const [phase, sec] of cycle) {
+          changes.push({ at_video_ms: t, phase, seq: seq++ });
+          t += sec * 1000;
+        }
       }
 
       const response = await fetch("/api/signal-timelines/", {

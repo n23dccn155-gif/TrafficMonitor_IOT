@@ -35,8 +35,8 @@ TrafficMonitor_IoT/
 │       ├── geometry.py                # Điểm trong đa giác, cắt vạch, vector góc
 │       ├── rules/                     # Ngược chiều, Lấn phân cách, Vượt đèn đỏ
 │       ├── engine.py                  # Bộ phối hợp & khóa 1 event / lượt đi
-│       └── signal_controller.py       # Tín hiệu đèn, fake serial & PySerial
-└── tests/                             # 42 bài test backend, rule, Arduino, live
+│       └── signal_controller.py       # Sinh timeline đèn an toàn (vàng → cả hai đỏ 3s)
+└── tests/                             # Test backend, rule, Arduino, live
 ```
 
 ---

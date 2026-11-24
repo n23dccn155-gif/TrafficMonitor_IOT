@@ -1,12 +1,10 @@
-"""Signal timeline generation and hardware controller interface.
-Zero external dependency for logic and FakeSerialAdapter; optional pyserial for real hardware.
+"""Signal timeline generation with the same safety rule as the Uno firmware.
+Handing right of way to the other road always runs own yellow -> ALL_RED -> target.
+Real hardware is driven only by web/monitor/services/arduino_signal_service.py.
 """
 from __future__ import annotations
 
-import json
-import time
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List
 
 from .schemas import SignalChange, SignalTimeline
 
@@ -19,10 +17,10 @@ class TimelineGenerator:
     @staticmethod
     def generate_timed(
         duration_ms: int,
-        a_green_sec: float = 10.0,
-        b_green_sec: float = 10.0,
+        a_green_sec: float = 15.0,
+        b_green_sec: float = 15.0,
         yellow_sec: float = 3.0,
-        all_red_sec: float = 2.0,
+        all_red_sec: float = 3.0,
         video_id: str = "video.mp4",
         timeline_id: str = "timed_simulation",
     ) -> SignalTimeline:
@@ -75,131 +73,34 @@ class TimelineGenerator:
         requested_group: str,  # "A" or "B" or "ALL_RED"
         at_video_ms: int,
         yellow_sec: float = 3.0,
-        all_red_sec: float = 2.0,
+        all_red_sec: float = 3.0,
         start_seq: int = 1,
     ) -> List[SignalChange]:
         """Generate safe transition sequence between groups.
-        Never transitions directly from A_GREEN to B_GREEN.
+        Never transitions directly from A_GREEN to B_GREEN; leaving ALL_YELLOW for a
+        green also passes through ALL_RED first.
         """
-        yellow_ms = int(yellow_sec * 1000)
-        all_red_ms = int(all_red_sec * 1000)
-        seq = start_seq
-        t = at_video_ms
-        changes: List[SignalChange] = []
-
-        if requested_group == "A":
-            if current_phase == "A_GREEN":
-                return changes
-            if current_phase in ("B_GREEN", "B_YELLOW"):
-                if current_phase == "B_GREEN":
-                    changes.append(SignalChange(at_video_ms=t, phase="B_YELLOW", source="manual_annotation", seq=seq))
-                    seq += 1
-                    t += yellow_ms
-                changes.append(SignalChange(at_video_ms=t, phase="ALL_RED", source="manual_annotation", seq=seq))
-                seq += 1
-                t += all_red_ms
-            changes.append(SignalChange(at_video_ms=t, phase="A_GREEN", source="manual_annotation", seq=seq))
-
-        elif requested_group == "B":
-            if current_phase == "B_GREEN":
-                return changes
-            if current_phase in ("A_GREEN", "A_YELLOW"):
-                if current_phase == "A_GREEN":
-                    changes.append(SignalChange(at_video_ms=t, phase="A_YELLOW", source="manual_annotation", seq=seq))
-                    seq += 1
-                    t += yellow_ms
-                changes.append(SignalChange(at_video_ms=t, phase="ALL_RED", source="manual_annotation", seq=seq))
-                seq += 1
-                t += all_red_ms
-            changes.append(SignalChange(at_video_ms=t, phase="B_GREEN", source="manual_annotation", seq=seq))
-
+        current_phase = current_phase or "UNKNOWN"
+        steps: List[tuple] = []  # (phase, ms until the next step)
+        own_group = current_phase[0] if current_phase[:2] in ("A_", "B_") else None
+        if requested_group in ("A", "B"):
+            target = f"{requested_group}_GREEN"
+            if current_phase == target:
+                return []
+            # Other road's phase, or ALL_YELLOW/UNKNOWN: clear the box before the green.
+            if own_group != requested_group and current_phase != "ALL_RED":
+                if current_phase.endswith("_GREEN"):
+                    steps.append((f"{own_group}_YELLOW", int(yellow_sec * 1000)))
+                steps.append(("ALL_RED", int(all_red_sec * 1000)))
+            steps.append((target, 0))
         elif requested_group in ("ALL_RED", "STOP"):
-            if current_phase == "A_GREEN":
-                changes.append(SignalChange(at_video_ms=t, phase="A_YELLOW", source="manual_annotation", seq=seq))
-                seq += 1
-                t += yellow_ms
-            elif current_phase == "B_GREEN":
-                changes.append(SignalChange(at_video_ms=t, phase="B_YELLOW", source="manual_annotation", seq=seq))
-                seq += 1
-                t += yellow_ms
-            changes.append(SignalChange(at_video_ms=t, phase="ALL_RED", source="manual_annotation", seq=seq))
+            if current_phase.endswith("_GREEN"):
+                steps.append((f"{own_group}_YELLOW", int(yellow_sec * 1000)))
+            steps.append(("ALL_RED", 0))
 
+        changes: List[SignalChange] = []
+        t = at_video_ms
+        for seq, (phase, duration_ms) in enumerate(steps, start=start_seq):
+            changes.append(SignalChange(at_video_ms=t, phase=phase, source="manual_annotation", seq=seq))
+            t += duration_ms
         return changes
-
-
-class SignalController(ABC):
-    @abstractmethod
-    def send_phase(self, phase: str, command_id: int) -> dict:
-        pass
-
-    @abstractmethod
-    def is_connected(self) -> bool:
-        pass
-
-
-class FakeSerialAdapter(SignalController):
-    """Simulates Arduino Uno serial ACK communication for automated testing."""
-
-    def __init__(self, simulate_disconnect: bool = False):
-        self.connected = not simulate_disconnect
-        self.last_phase = "ALL_RED"
-        self.seq = 0
-
-    def is_connected(self) -> bool:
-        return self.connected
-
-    def send_phase(self, phase: str, command_id: int) -> dict:
-        if not self.connected:
-            return {"command_id": command_id, "status": "ERROR", "error": "Serial disconnected"}
-        if phase not in VALID_PHASES:
-            return {"command_id": command_id, "status": "REJECTED", "error": f"Invalid phase: {phase}"}
-
-        self.seq += 1
-        self.last_phase = phase
-        return {
-            "command_id": command_id,
-            "seq": self.seq,
-            "phase": phase,
-            "t_ms": int(time.time() * 1000) % 1000000,
-            "status": "ACK",
-        }
-
-
-class PySerialAdapter(SignalController):
-    """Hardware serial adapter for real Arduino Uno R3 via USB COM port."""
-
-    def __init__(self, port: str = "COM3", baudrate: int = 115200, timeout: float = 1.0):
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
-        self.ser = None
-        self._try_connect()
-
-    def _try_connect(self) -> bool:
-        try:
-            import serial  # type: ignore
-
-            self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
-            time.sleep(1.5)  # Allow Arduino bootloader reset
-            return True
-        except Exception:
-            self.ser = None
-            return False
-
-    def is_connected(self) -> bool:
-        return self.ser is not None and self.ser.is_open
-
-    def send_phase(self, phase: str, command_id: int) -> dict:
-        if not self.is_connected():
-            if not self._try_connect():
-                return {"command_id": command_id, "status": "ERROR", "error": "Hardware serial not connected"}
-
-        try:
-            cmd = json.dumps({"command_id": command_id, "phase": phase}) + "\n"
-            self.ser.write(cmd.encode("utf-8"))
-            line = self.ser.readline().decode("utf-8").strip()
-            if not line:
-                return {"command_id": command_id, "status": "TIMEOUT", "error": "No ACK received"}
-            return json.loads(line)
-        except Exception as e:
-            return {"command_id": command_id, "status": "ERROR", "error": str(e)}

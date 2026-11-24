@@ -18,6 +18,9 @@ global.document = { getElementById(id) {
 global.app = { currentStep: 3, selectedSourceType: "live", onSignalPhaseChanged() {} };
 global.setInterval = () => 1;
 global.clearInterval = () => {};
+let timers = [];
+global.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
+global.clearTimeout = () => {};
 const actions = [];
 global.fetch = async (url, options) => {
   if (url === "/api/signal-timelines/") return { ok: true };
@@ -75,10 +78,26 @@ async function main() {
   // Clicking one yellow again drops back to that road alone.
   panel.onBulbClick("A", "yellow");
   assert.equal(panel.currentPhase, "B_YELLOW");
-  // A green click leaves BOTH_YELLOW safely (never two greens).
+  // A green click leaves BOTH_YELLOW through ALL_RED 3 s (never two greens).
   panel.setPhase("ALL_YELLOW");
   panel.onBulbClick("A", "green");
+  assert.equal(panel.currentPhase, "ALL_RED");
+  assert.equal(timers.shift().ms, 3000);
+  panel._runTransitionStep();
   assert.equal(panel.currentPhase, "A_GREEN");
+
+  // With the board connected, a conflicting click is sent as-is and the UI waits for
+  // the Uno's yellow/ALL_RED instead of showing the target green early.
+  panel.hardwareEnabled = true;
+  panel.applyHardwareState({
+    port: "COM7", phase: "A_GREEN", remaining_ms: 0, mode: "manual",
+    a_green: 15, a_yellow: 3, b_green: 15, b_yellow: 3,
+  });
+  panel.onBulbClick("B", "green");
+  assert.equal(panel.currentPhase, "A_GREEN"); // no optimistic B_GREEN before the reply
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(actions.at(-1), { action: "manual", phase: "B_GREEN" });
+  assert.equal(panel.currentPhase, "ALL_RED"); // mocked Uno reply
   console.log("Arduino UI connect and automatic timing OK");
   console.log("manual ALL_YELLOW phase OK");
 }

@@ -30,7 +30,7 @@
      - `lane_encroachment`: Lấn qua đường phân cách `center_boundary` giữa hai chiều của cùng một đường ngoài vùng giao cắt, duy trì đủ dải đệm & số frame.
      - `red_light`: Cắt vạch dừng `stop_line` của hướng xe tương ứng khi nhóm đèn đang đỏ (hoặc pha không phải Green).
    - **Nguyên tắc kích hoạt 1 lần:** Trạng thái lưu theo `(segment_id, track_id, rule_type)`. Chỉ phát event khi chuyển từ chưa vi phạm sang xác nhận; các frame tiếp theo của xe trong lượt đi đó KHÔNG phát thêm event.
-   - `SignalController` interface + fake serial ACK + adapter `pyserial`.
+   - `TimelineGenerator` sinh timeline đèn an toàn (vàng → `ALL_RED` 3s); phần cứng Uno điều khiển qua `web/monitor/services/arduino_signal_service.py` (USB Serial 9600, lệnh `STATUS/AUTO/MANUAL`).
 
 ---
 
