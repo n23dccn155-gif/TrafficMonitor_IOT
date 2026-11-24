@@ -13,15 +13,10 @@ from ..models import TrackingJob
 
 
 def _run_algorithm(run_id: str, summary: dict) -> str:
-    """Identify old CLI outputs as well as jobs launched by this web app."""
+    """Identify TechGAR outputs launched by the CLI or web app."""
     name = str(summary.get("algorithm", "")).lower()
-    weights = ntpath.basename(str(summary.get("weights", ""))).lower()
-    if "yolov8" in name or "yolov8" in weights:
-        return "3"
-    if "yolo11" in name or "yolo11" in weights:
-        return "1"
-    if "mog2" in name:
-        return "2"
+    if "techgar" in name:
+        return "techgar"
     return TrackingJob.objects.filter(job_id=run_id).values_list("algorithm", flat=True).first() or "unknown"
 
 
@@ -39,13 +34,16 @@ def list_tracking_runs(source_name: str) -> List[Dict[str, Any]]:
             summary = json.loads(summary_file.read_text(encoding="utf-8"))
             if ntpath.basename(str(summary.get("source", ""))) != source_name:
                 continue
+            algorithm = _run_algorithm(run_dir.name, summary)
+            if algorithm != "techgar":
+                continue
             processed_frames = int(summary.get("processed_frames", 0))
             source_frames = int(summary.get("source_frames", 0))
             complete = (processed_frames >= source_frames - 1 if source_frames > 0
                         else TrackingJob.objects.filter(job_id=run_dir.name, status="DONE").exists())
             runs.append({
                 "run_id": run_dir.name,
-                "algorithm": _run_algorithm(run_dir.name, summary),
+                "algorithm": algorithm,
                 "processed_frames": processed_frames,
                 "source_frames": source_frames,
                 "processed_seconds": summary.get("processed_seconds_of_video"),
@@ -53,7 +51,7 @@ def list_tracking_runs(source_name: str) -> List[Dict[str, Any]]:
             })
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             continue
-    return sorted(runs, key=lambda run: (run["complete"], run["algorithm"] == "3", run["run_id"]), reverse=True)
+    return sorted(runs, key=lambda run: (run["complete"], run["algorithm"] == "techgar", run["run_id"]), reverse=True)
 
 
 def find_run_output_dir(run_id: str) -> Optional[Path]:

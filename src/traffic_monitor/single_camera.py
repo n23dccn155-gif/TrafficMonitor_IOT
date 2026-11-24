@@ -1,14 +1,12 @@
 """Run the existing TechGAR motion tracker on one recorded traffic camera.
 
-This is a P0 baseline and deliberately does not classify traffic violations.
-It imports TechGAR from the sibling reference project without changing its code.
+The TechGAR tracker is vendored in this repository.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -19,15 +17,12 @@ from debug_preview import DebugPreview, ProcessingMeter
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-TECHGAR_ROOT = Path(os.environ.get(
-    "TECHGAR_ROOT",
-    str(PROJECT_ROOT.parent / "TechGAR_Parking" / "TechGAR_Parking" / "backend" / "main_detect"),
-)).expanduser().resolve()
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TechGAR baseline on one MP4 camera")
-    parser.add_argument("--source", type=Path, required=True, help="Input MP4 path")
+    parser.add_argument("--source", required=True, help="Input MP4 path or camera URL")
     parser.add_argument("--output", type=Path, required=True, help="Output directory")
     parser.add_argument("--width", type=int, default=1280, help="Processing width in pixels")
     parser.add_argument("--max-frames", type=int, default=None, help="Limit for a short probe")
@@ -42,13 +37,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.width <= 0 or (args.max_frames is not None and args.max_frames <= 0):
         parser.error("--width and --max-frames must be positive")
-    if not args.source.is_file():
+    if not args.source.startswith(("http://", "https://", "rtsp://")) and not Path(args.source).is_file():
         parser.error(f"Input video not found: {args.source}")
-    if not (TECHGAR_ROOT / "src" / "techgar" / "motion_tracker.py").is_file():
-        parser.error(
-            f"TechGAR reference missing: {TECHGAR_ROOT}. "
-            "Option 2 needs the separate TechGAR repository; set TECHGAR_ROOT to its backend/main_detect directory."
-        )
     return args
 
 
@@ -56,7 +46,9 @@ def track_record(track: object) -> dict:
     x, y, w, h = track.bbox
     return {
         "track_id": int(track.track_id),
-        "vehicle_type": "unknown",  # Motion blobs do not identify a vehicle class.
+        "vehicle_type": "vehicle",  # Motion alone cannot classify vehicle subtype.
+        "class_confidence": 0.0,
+        "track_source": "techgar",
         "bbox_xyxy": [int(x), int(y), int(x + w), int(y + h)],
         "ground_point_xy": [int(track.cx), int(track.cy)],
         "trajectory_xy": [[int(px), int(py)] for px, py in track.history],
@@ -99,8 +91,8 @@ def draw_overlay(frame, records: list[dict], frame_index: int, timestamp_ms: int
 
 def main() -> None:
     args = parse_args()
-    sys.path.insert(0, str(TECHGAR_ROOT / "src"))
-    from techgar.motion_tracker import MotionVehicleTracker
+    from src.traffic_monitor.techgar_motion.motion_tracker import MotionVehicleTracker
+    from src.traffic_monitor.techgar_motion.vehicle_tracker import TrackStatus
 
     capture = cv2.VideoCapture(str(args.source))
     if not capture.isOpened():
@@ -161,7 +153,8 @@ def main() -> None:
                 frame = cv2.resize(source_frame, (width, height))
                 timestamp_ms = round(frame_index * 1000 / source_fps)
                 _, mask, _ = tracker.process_frame(frame, timestamp_s=timestamp_ms / 1000)
-                records = [track_record(t) for t in tracker.active_tracks.values()]
+                records = [track_record(t) for t in tracker.observable_tracks.values()
+                           if t.status in (TrackStatus.CONFIRMED, TrackStatus.LOST)]
                 track_ids.update(item["track_id"] for item in records)
                 max_simultaneous = max(max_simultaneous, len(records))
                 total_observations += len(records)
@@ -196,7 +189,8 @@ def main() -> None:
 
     elapsed = time.perf_counter() - started
     summary = {
-        "source": str(args.source.resolve()),
+        "algorithm": "TechGAR motion + identity tracking",
+        "source": str(Path(args.source).resolve()) if Path(args.source).is_file() else args.source,
         "source_fps": source_fps,
         "source_size": [source_width, source_height],
         "source_frames": source_frames,

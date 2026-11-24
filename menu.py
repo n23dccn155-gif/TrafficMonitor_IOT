@@ -143,36 +143,15 @@ def select_source(cfg: dict) -> str | None:
             print("Lựa chọn không hợp lệ. Vui lòng nhập 1, 2 hoặc 0.")
 
 
-def select_algorithm() -> str | None:
-    while True:
-        print("\n=======================================================")
-        print("         BƯỚC 2: CHỌN THUẬT TOÁN QUAN SÁT & THEO DÕI ID")
-        print("=======================================================")
-        print("  1. YOLO11s chia 4 ô + ByteTrack (thử nghiệm, ưu tiên xe nhỏ)")
-        print("     • Đổi lại: rất nặng CPU; vẫn có thể bỏ sót xe và đổi ID")
-        print()
-        print("  2. MOG2 trừ nền + Kalman (có sẵn trong repo)")
-        print("     • Quan sát: vùng chuyển động; gán ID, không phân loại xe")
-        print("     • Có thể mất xe dừng, xe bị che và tạo box sai")
-        print()
-        print("  3. Thuật toán 3: YOLOv8n + ByteTrack (Baseline)")
-        print("     • Quan sát: Ô tô, Xe máy, Xe tải, Xe buýt ở độ rộng bạn chọn")
-        print("     • Gán ID: ByteTrack tiêu chuẩn")
-        print()
-        print("  0. Quay lại bước chọn nguồn")
-        print("-------------------------------------------------------")
-
-        choice = input("Nhập lựa chọn thuật toán (1, 2, 3 hoặc 0): ").strip()
-        if choice in ("0", "1", "2", "3"):
-            return choice if choice != "0" else None
-        print("Lựa chọn không hợp lệ, vui lòng nhập 1, 2, 3 hoặc 0.")
+def select_algorithm() -> str:
+    print("Thuật toán: TechGAR (phát hiện chuyển động và giữ ID xe).")
+    print("Chưa phân loại ô tô/xe máy từ ảnh.")
+    return "techgar"
 
 
-# Preset chất lượng: video file luôn được đọc tuần tự, không bỏ frame.
-# Giảm độ phân giải giúp giảm lượng tính toán, nhưng cũng làm mất chi tiết xe nhỏ.
 SPEED_PRESETS = {
     "1": {
-        "name": "Chi tiết cao: 1280 px, YOLO11s chia 4 ô (rất chậm trên CPU)",
+        "name": "Chi tiết cao: 1280 px, TechGAR",
         "width": 1280, "tile_imgsz": 960, "cli_width": 1280,
     },
     "2": {
@@ -227,11 +206,7 @@ def main():
         output_dir = PROJECT_ROOT / "outputs" / "runs" / run_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        algo_names = {
-            "1": "Thuật toán 1 (YOLO11s Tiling 2x2 + ByteTrack - Quan sát Ô tô & Xe máy nhỏ)",
-            "2": "Thuật toán 2 (MOG2 trừ nền + Kalman, độc lập)",
-            "3": "Thuật toán 3 (YOLOv8n Baseline + ByteTrack)",
-        }
+        algo_names = {"techgar": "TechGAR motion + identity tracking"}
 
         print(f"\n=======================================================")
         print(f"  KHỞI ĐỘNG XỬ LÝ [{run_id}]")
@@ -250,34 +225,12 @@ def main():
         py_exe = str(venv_py) if venv_py.is_file() else sys.executable
 
         try:
-            if algo == "1":
-                # Chạy bằng tiến trình riêng như thuật toán 2/3: khi kết
-                # thúc, hệ điều hành thu hồi toàn bộ RAM + thread torch,
-                # máy không còn bị đơ/slow sau khi chạy xong thuật toán 1.
-                script = str(SRC_DIR / "tiled_yolo11_camera.py")
-                cmd = [
-                    py_exe, script,
-                    "--source", source,
-                    "--output-dir", str(output_dir),
-                    "--width", str(speed["width"]),
-                    "--tile-imgsz", str(speed["tile_imgsz"]),
-                    "--show",
-                ]
-                if save_mp4:
-                    cmd.append("--save-video")
-                subprocess.run(cmd, check=True)
-            elif algo == "2":
-                script = str(SRC_DIR / "motion_camera.py")
-                cmd = [py_exe, script, "--source", source, "--output", str(output_dir), "--show", "--width", str(speed["cli_width"])]
-                if save_mp4:
-                    cmd.append("--save-video")
-                subprocess.run(cmd, check=True)
-            elif algo == "3":
-                script = str(SRC_DIR / "yolo_camera.py")
-                cmd = [py_exe, script, "--source", source, "--output", str(output_dir), "--show", "--width", str(speed["cli_width"])]
-                if save_mp4:
-                    cmd.append("--save-video")
-                subprocess.run(cmd, check=True)
+            script = str(SRC_DIR / "single_camera.py")
+            cmd = [py_exe, script, "--source", source, "--output", str(output_dir),
+                   "--show", "--width", str(speed["cli_width"])]
+            if save_mp4:
+                cmd.append("--save-video")
+            subprocess.run(cmd, check=True)
 
         except KeyboardInterrupt:
             print("\n[Hủy] Người dùng đã nhấn Ctrl+C.")

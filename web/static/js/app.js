@@ -205,18 +205,18 @@ class Application {
     if (!res.ok) throw new Error("Không đọc được danh sách bản nhận diện");
     const data = await res.json();
     if (source !== this.currentVideo) return;
-    const runs = data.runs || [];
+    const runs = (data.runs || []).filter((run) => run.algorithm === "techgar");
     this.availableRuns = runs;
-    this.currentTrackingRunId = runs.find((run) => run.complete && run.algorithm === "3")?.run_id || null;
+    this.currentTrackingRunId = runs.find((run) => run.complete && run.algorithm === "techgar")?.run_id || null;
     const select = document.getElementById("trackingRunSelect");
     if (select) {
       select.innerHTML = "";
-      if (!this.currentTrackingRunId) select.add(new Option("Chưa có bản YOLOv8n đầy đủ", ""));
+      if (!this.currentTrackingRunId) select.add(new Option("Chưa có bản TechGAR đầy đủ", ""));
       for (const run of runs) {
         const coverage = run.source_frames
           ? ` / ${run.source_frames} khung hình` : " khung hình";
         const label = run.complete ? "đầy đủ" : "chưa đủ";
-        const algorithm = { "3": "YOLOv8n", "2": "MOG2 (không phân loại xe)", "1": "YOLO11s" }[run.algorithm] || "thuật toán chưa rõ";
+        const algorithm = "TechGAR";
         select.add(new Option(`${algorithm} · ${run.run_id} (${run.processed_frames}${coverage}, ${label})`, run.run_id));
       }
       select.value = this.currentTrackingRunId || "";
@@ -228,10 +228,10 @@ class Application {
     if (this.currentTrackingRunId) return;
     const source = this.currentVideo;
     const badge = document.getElementById("monitoringStatusBadge");
-    if (badge) badge.textContent = "Đang nhận diện video bằng YOLO; có thể mất vài phút...";
+    if (badge) badge.textContent = "Đang theo dõi xe bằng TechGAR; có thể mất vài phút...";
     const response = await fetch("/api/tracking/jobs/", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, algorithm: "3", width: 1280 }),
+      body: JSON.stringify({ source, algorithm: "techgar", width: 960 }),
     });
     const job = await response.json();
     if (!response.ok) throw new Error(job.error || "Không tạo được tác vụ nhận diện");
@@ -474,20 +474,13 @@ class Application {
           this.player.setLiveFrame(data.result_age_ms > 5000 ? null : data.frame);
           if (badge && data.status === "RUNNING") {
             const stats = data.frame?.detection_stats || {};
-            const tracked = stats.yolo_tracks || 0;
-            const detected = stats.yolo_detections || 0;
+            const tracked = stats.motion_tracks || 0;
             if (data.detector_warning) {
-              badge.textContent = "Lỗi YOLO: " + data.detector_warning;
-            } else if (!data.model_ready) {
-              badge.textContent = "Đang tải mô hình YOLOv8...";
+              badge.textContent = "Lỗi TechGAR: " + data.detector_warning;
             } else if (data.result_age_ms > 5000) {
-              badge.textContent = "Nhận diện đang chậm — kiểm tra tải CPU";
-            } else if (!tracked && !detected && stats.rejected_boxes > 0) {
-              badge.textContent = "YOLO nhận nhầm vùng quá lớn — hãy chỉnh góc camera";
-            } else if (!tracked && !detected) {
-              badge.textContent = "Camera có hình · YOLO chưa nhận ra ô tô hoặc xe máy";
+              badge.textContent = "Theo dõi đang chậm — kiểm tra tải CPU";
             } else {
-              badge.textContent = "Camera trực tiếp · " + tracked + " xe YOLO có ID, " + detected + " xe YOLO chưa có ID";
+              badge.textContent = "Camera trực tiếp · " + tracked + " xe có ID TechGAR";
             }
           }
           if (badge && data.status === "FAILED") badge.textContent = `Lỗi xử lý: ${data.error}`;
@@ -563,7 +556,7 @@ class Application {
     this.eventsManager.reset();
     const run = this.availableRuns?.find((item) => item.run_id === runId);
     const badge = document.getElementById("monitoringStatusBadge");
-    if (badge && run?.algorithm === "2") badge.textContent = "MOG2 chỉ bám vật chuyển động; nhãn xe là unknown. Chọn YOLOv8n để phân loại xe.";
+    if (badge && run?.algorithm === "techgar") badge.textContent = "TechGAR theo dõi chuyển động và giữ ID; chưa phân loại ô tô/xe máy.";
     if (this.player) {
       this.player.setRun(this.currentTrackingRunId);
     }

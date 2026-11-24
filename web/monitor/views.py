@@ -99,7 +99,7 @@ def tracking_jobs_api(request):
             return JsonResponse({"error": "Invalid JSON"}, status=400)
 
         source = data.get("source", "vd3.mp4")
-        algo = str(data.get("algorithm", "3"))
+        algo = str(data.get("algorithm", "techgar"))
         width = int(data.get("width", 1280))
         tile_imgsz = int(data.get("tile_imgsz", 640))
 

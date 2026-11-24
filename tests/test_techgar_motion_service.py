@@ -20,7 +20,7 @@ def test_techgar_motion_keeps_id_for_moving_small_vehicle():
                         if abs(track["ground_point_xy"][1] - 165) < 18)
     assert size == [640, 360]
     assert len(seen) >= 5
-    assert all(track_id < 0 for track_id in seen)
+    assert all(track_id > 0 for track_id in seen)
     assert len(set(seen)) == 1
 
 
@@ -58,4 +58,4 @@ def test_techgar_motion_can_feed_red_line_rule():
         events.extend(engine.process_frame(TrackFrame.from_dict(data)))
     red_events = [event for event in events if event.rule_type == "red_light"]
     assert len(red_events) == 1
-    assert red_events[0].track_id < 0
+    assert red_events[0].track_id > 0

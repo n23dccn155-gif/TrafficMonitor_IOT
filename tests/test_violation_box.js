@@ -210,8 +210,8 @@ async function main() {
     processing_size: [320, 240],
     tracks: [{
       track_id: 99,
-      track_source: "motion",
-      vehicle_type: "motion_candidate",
+      track_source: "techgar",
+      vehicle_type: "vehicle",
       observation_kind: "detection",
       bbox_xyxy: [32, 24, 64, 48],
     }],
@@ -219,7 +219,7 @@ async function main() {
   player.video.currentTime = 1.2;
   player._renderOverlay();
   const motionBox = boxes.at(-1);
-  assert.equal(motionBox.color, "#a855f7", "Motion candidate keeps purple color (#a855f7)");
+  assert.equal(motionBox.color, "#ef4444", "TechGAR track shows its violation in red");
 
   // 7. Reset clears violationEvents
   eventsManager.reset();

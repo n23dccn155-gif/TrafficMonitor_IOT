@@ -17,18 +17,18 @@ async function main() {
   const application = new Application();
   application.currentVideo = "vd1.mp4";
   runs = [
-    { run_id: "older_yolo", algorithm: "3", complete: true, processed_frames: 100, source_frames: 100 },
-    { run_id: "newer_mog2", algorithm: "2", complete: true, processed_frames: 100, source_frames: 100 },
+    { run_id: "older_techgar", algorithm: "techgar", complete: true, processed_frames: 100, source_frames: 100 },
+    { run_id: "newer_legacy", algorithm: "2", complete: true, processed_frames: 100, source_frames: 100 },
   ];
   await application.loadTrackingRuns();
-  assert.equal(application.currentTrackingRunId, "older_yolo");
-  assert.match(select.options[1].text, /MOG2 \(không phân loại xe\)/);
+  assert.equal(application.currentTrackingRunId, "older_techgar");
+  assert.equal(select.options.length, 1);
 
   runs = [runs[1]];
   select.options = [];
   await application.loadTrackingRuns();
   assert.equal(application.currentTrackingRunId, null);
-  assert.match(select.options[0].text, /Chưa có bản YOLOv8n đầy đủ/);
-  console.log("MP4 defaults to a complete YOLOv8n run OK");
+  assert.match(select.options[0].text, /Chưa có bản TechGAR đầy đủ/);
+  console.log("MP4 defaults to a complete TechGAR run OK");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

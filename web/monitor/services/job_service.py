@@ -29,10 +29,12 @@ class JobManager:
     def start_job(
         cls,
         source_name: str,
-        algorithm: str = "3",
+        algorithm: str = "techgar",
         width: int = 1280,
         tile_imgsz: int = 640,
     ) -> TrackingJob:
+        if algorithm != "techgar":
+            raise ValueError("Only TechGAR tracking is available on this branch")
         # Determine source path
         raw_dir = settings.DATA_RAW_DIR
         source_path = (raw_dir / os.path.basename(source_name)).resolve()
@@ -72,45 +74,9 @@ class JobManager:
 
             src_dir = project_root / "src" / "traffic_monitor"
 
-            # Command mapping per prompt contract
-            if job.algorithm == "1":
-                script = str(src_dir / "tiled_yolo11_camera.py")
-                cmd = [
-                    py_exe,
-                    script,
-                    "--source",
-                    job.source_path,
-                    "--output-dir",
-                    job.output_dir,
-                    "--width",
-                    str(job.width),
-                    "--tile-imgsz",
-                    str(job.tile_imgsz),
-                ]
-            elif job.algorithm == "2":
-                script = str(src_dir / "motion_camera.py")
-                cmd = [
-                    py_exe,
-                    script,
-                    "--source",
-                    job.source_path,
-                    "--output",
-                    job.output_dir,
-                    "--width",
-                    str(job.width),
-                ]
-            else:  # Default algo 3: YOLOv8n baseline
-                script = str(src_dir / "yolo_camera.py")
-                cmd = [
-                    py_exe,
-                    script,
-                    "--source",
-                    job.source_path,
-                    "--output",
-                    job.output_dir,
-                    "--width",
-                    str(job.width),
-                ]
+            cmd = [py_exe, str(src_dir / "single_camera.py"),
+                   "--source", job.source_path, "--output", job.output_dir,
+                   "--width", str(job.width)]
 
             try:
                 proc = subprocess.Popen(

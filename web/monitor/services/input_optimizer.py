@@ -1,18 +1,10 @@
-"""Làm sạch đầu vào camera trực tiếp trước khi đưa vào YOLO và Rule Engine.
-
-- Cắt khung theo vùng quan tâm (ROI) lấy từ cấu hình cảnh: xe trong vùng được
-  nhiều điểm ảnh hơn ở cùng kích thước ảnh vào model.
-- Đổi toạ độ box từ ảnh đã cắt/thu nhỏ về pixel của frame gốc.
-- Lọc track: chỉ track đủ tuổi mới được xét luật; nhãn lớp lấy theo đa số;
-  điểm chân xe được làm mượt để một box giật không tạo vi phạm giả.
-"""
+"""Scene ROI geometry and optional track smoothing helpers."""
 from __future__ import annotations
 
 from collections import Counter, deque
 
 from src.traffic_monitor.traffic_rules.geometry import point_in_polygon, scale_point
 
-MAX_SIDE = 960          # cạnh dài nhất của ảnh vào YOLO (khớp imgsz)
 ROI_MARGIN = 0.08       # lề thêm quanh ROI, theo tỉ lệ kích thước ROI
 MIN_ROI_SIDE = 32
 MIN_TRACK_FRAMES = 3    # track phải xuất hiện ít nhất N frame mới được xét luật
@@ -45,23 +37,6 @@ def roi_rect(polygons, frame_size, margin: float = ROI_MARGIN) -> tuple[int, int
     if x2 - x1 < MIN_ROI_SIDE or y2 - y1 < MIN_ROI_SIDE:
         return 0, 0, width, height
     return x1, y1, x2, y2
-
-
-def yolo_input_size(crop_width: int, crop_height: int, max_side: int = MAX_SIDE) -> tuple[int, int]:
-    """Thu nhỏ một lần, giữ tỉ lệ; không phóng to ảnh nhỏ."""
-    scale = min(1.0, max_side / max(crop_width, crop_height))
-    return max(2, round(crop_width * scale)), max(2, round(crop_height * scale))
-
-
-def box_to_frame(box, yolo_size, rect) -> list[int]:
-    """Box trong ảnh vào YOLO -> box trong frame gốc (bù tỉ lệ và độ lệch của ROI)."""
-    x0, y0, x1, y1 = rect
-    scale_x = (x1 - x0) / yolo_size[0]
-    scale_y = (y1 - y0) / yolo_size[1]
-    return [
-        int(round(box[0] * scale_x)) + x0, int(round(box[1] * scale_y)) + y0,
-        int(round(box[2] * scale_x)) + x0, int(round(box[3] * scale_y)) + y0,
-    ]
 
 
 def point_in_roi(point, polygons) -> bool:

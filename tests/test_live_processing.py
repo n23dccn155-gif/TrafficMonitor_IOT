@@ -1,6 +1,5 @@
 import json
 import time
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -9,7 +8,7 @@ from django.test import override_settings
 
 from monitor.models import RuleRunRecord, SceneConfigRecord, ViolationEventRecord
 from monitor.services.droidcam_service import DroidCamManager
-from monitor.services.live_processing_service import LiveProcessingManager, is_usable_vehicle_box
+from monitor.services.live_processing_service import LiveProcessingManager
 from src.traffic_monitor.traffic_rules.schemas import SignalChange, SignalTimeline
 
 
@@ -67,12 +66,6 @@ def test_snapshot_fallback_keeps_advancing_frames():
             assert camera.get_status()["connected"] is True
     finally:
         camera.stop()
-
-
-def test_full_frame_car_detection_is_not_used_for_violations():
-    assert is_usable_vehicle_box([1, 1, 639, 479], 640, 480) is False
-    assert is_usable_vehicle_box([646, 0, 1275, 610], 1280, 709) is False
-    assert is_usable_vehicle_box([100, 100, 180, 150], 640, 480) is True
 
 
 def test_live_phase_uses_change_time_not_last_processed_frame():
@@ -140,82 +133,29 @@ def test_events_can_be_filtered_by_live_run(client):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_live_worker_processes_shared_camera_frames(client):
+def test_live_worker_uses_techgar_ids(client):
     camera = DroidCamManager.get_instance()
     camera.connect("mock://droidcam")
     scene = SceneConfigRecord.objects.create(
-        scene_id="scene_live_worker", source_id="live", version=1,
-        data_json={"scene_id": "scene_live_worker", "source_id": "live", "reference_size": [640, 480], "roads": {}},
-    )
-    manager = LiveProcessingManager.get_instance()
-    manager.stop()
-    previous_model = manager._model
-    previous_error = manager._model_error
-    previous_ready = manager._model_ready.is_set()
-    class OversizedBoxes(list):
-        id = np.array([1])
-
-    oversized = SimpleNamespace(
-        id=np.array([1]), xyxy=np.array([[0, 0, 640, 480]]),
-        cls=np.array([2]), conf=np.array([0.9]),
-    )
-    fake_model = SimpleNamespace(
-        predict=lambda *args, **kwargs: [],
-        track=lambda *args, **kwargs: [SimpleNamespace(
-            boxes=OversizedBoxes([oversized]), names={2: "car"},
-        )],
-        predictor=None,
-    )
-    try:
-        manager._model = (fake_model, "cpu")
-        manager._model_error = ""
-        manager._model_ready.set()
-        with patch.object(manager, "prepare"):
-            response = client.post(
-                "/api/live/processing/",
-                data=json.dumps({"scene_config_id": scene.scene_id, "phase": "A_GREEN"}),
-                content_type="application/json",
-            )
-            assert response.status_code == 202
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                status = client.get("/api/live/processing/").json()
-                if status["status"] == "RUNNING":
-                    break
-                time.sleep(0.05)
-            assert status["status"] == "RUNNING", status
-            assert status["frame"]["processing_size"] == [640, 480]
-            assert status["frame"]["tracks"] == []
-            assert status["frame"]["detection_stats"]["rejected_boxes"] == 1
-            assert RuleRunRecord.objects.filter(rule_run_id=status["run_id"]).exists()
-    finally:
-        manager.stop()
-        camera.stop()
-        manager._model = previous_model
-        manager._model_error = previous_error
-        if not previous_ready:
-            manager._model_ready.clear()
-
-
-@pytest.mark.django_db(transaction=True)
-def test_live_reports_yolo_unavailable_without_motion_fallback():
-    camera = DroidCamManager.get_instance()
-    camera.connect("mock://droidcam")
-    scene = SceneConfigRecord.objects.create(
-        scene_id="scene_motion_without_yolo", source_id="live", version=1,
-        data_json={"scene_id": "scene_motion_without_yolo", "source_id": "live",
+        scene_id="scene_techgar_worker", source_id="live", version=1,
+        data_json={"scene_id": "scene_techgar_worker", "source_id": "live",
                    "reference_size": [640, 480], "roads": {}},
     )
     manager = LiveProcessingManager.get_instance()
     manager.stop()
-    previous_model = manager._model
-    previous_error = manager._model_error
-    previous_ready = manager._model_ready.is_set()
+
+    class FakeTechGar:
+        def process(self, frame, timestamp_ms, frame_index):
+            return ([{"track_id": 42, "track_source": "techgar",
+                      "vehicle_type": "vehicle", "bbox_xyxy": [100, 100, 150, 140],
+                      "ground_point_xy": [125, 140], "trajectory_xy": [[125, 140]],
+                      "observation_kind": "detection"}], [640, 480])
+        def reset(self):
+            pass
+
     try:
-        manager._model = None
-        manager._model_error = "YOLO unavailable in test"
-        manager._model_ready.set()
-        with patch.object(manager, "prepare"):
+        with patch("monitor.services.live_processing_service.TechGarMotionAdapter",
+                   return_value=FakeTechGar()):
             run_id = manager.start(scene, "A_GREEN")["run_id"]
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
@@ -225,109 +165,27 @@ def test_live_reports_yolo_unavailable_without_motion_fallback():
                 time.sleep(0.05)
             assert status["status"] == "RUNNING", status
             assert status["run_id"] == run_id
-            assert status["frame"]["detection_stats"]["raw_boxes"] == 0
-            assert status["detector_warning"] == "YOLO unavailable in test"
-            assert status["frame"]["tracks"] == []
-            assert status["frame"]["yolo_detections"] == []
-            assert status["frame"]["detection_stats"]["motion_tracks"] == 0
+            assert status["frame"]["tracks"][0]["track_id"] == 42
+            assert status["frame"]["tracks"][0]["track_source"] == "techgar"
+            assert status["frame"]["detection_stats"]["motion_tracks"] == 1
+            assert RuleRunRecord.objects.filter(rule_run_id=run_id).exists()
     finally:
         manager.stop()
         camera.stop()
-        manager._model = previous_model
-        manager._model_error = previous_error
-        if not previous_ready:
-            manager._model_ready.clear()
 
 
 @pytest.mark.django_db(transaction=True)
-def test_live_untracked_yolo_detection_is_displayed_but_not_scored():
-    class UntrackedBoxes(list):
-        id = None
-
-    box = SimpleNamespace(
-        id=None, xyxy=np.array([[100, 100, 180, 160]]),
-        cls=np.array([2]), conf=np.array([0.8]),
-    )
-    fake_model = SimpleNamespace(
-        track=lambda *args, **kwargs: [SimpleNamespace(
-            boxes=UntrackedBoxes([box]), names={2: "car"},
-        )], predictor=None,
-    )
+def test_live_techgar_crossing_red_line_saves_evidence(tmp_path):
     scene = SceneConfigRecord.objects.create(
-        scene_id="scene_untracked_yolo", source_id="live", version=1,
-        data_json={"scene_id": "scene_untracked_yolo", "source_id": "live",
-                   "reference_size": [640, 480], "roads": {}},
-    )
-    camera = DroidCamManager.get_instance()
-    manager = LiveProcessingManager.get_instance()
-    camera.connect("mock://droidcam")
-    manager.stop()
-    previous_model = manager._model
-    previous_ready = manager._model_ready.is_set()
-    try:
-        manager._model = (fake_model, "cpu")
-        manager._model_ready.set()
-        with patch.object(manager, "prepare"):
-            run_id = manager.start(scene, "A_GREEN")["run_id"]
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                status = manager.get_status()
-                if status["status"] == "RUNNING" and status["frame"]:
-                    break
-                time.sleep(0.05)
-            frame = status["frame"]
-            assert frame["tracks"] == []
-            assert frame["yolo_detections"] == [{
-                "vehicle_type": "car", "class_confidence": 0.8,
-                "bbox_xyxy": [100, 100, 180, 160],
-            }]
-            assert frame["detection_stats"]["yolo_detections"] == 1
-            assert not ViolationEventRecord.objects.filter(rule_run_id=run_id).exists()
-    finally:
-        manager.stop()
-        camera.stop()
-        manager._model = previous_model
-        if not previous_ready:
-            manager._model_ready.clear()
-
-
-@pytest.mark.django_db(transaction=True)
-def test_live_vehicle_crossing_red_line_saves_current_frame_evidence(tmp_path):
-    class FakeValue:
-        def __init__(self, value):
-            self.value = value
-
-        def item(self):
-            return self.value
-
-        def tolist(self):
-            return self.value
-
-    class FakeBoxes(list):
-        id = FakeValue(42)
-
-    class FakeModel:
-        predictor = None
-        calls = 0
-
-        def track(self, *args, **kwargs):
-            y = (210, 230, 250, 270, 290)[min(self.calls, 4)]
-            self.calls += 1
-            box = SimpleNamespace(
-                id=FakeValue(42), xyxy=[FakeValue([100, y - 40, 150, y])],
-                cls=FakeValue(2), conf=FakeValue(0.9),
-            )
-            return [SimpleNamespace(boxes=FakeBoxes([box]), names={2: "car"})]
-
-    scene = SceneConfigRecord.objects.create(
-        scene_id="scene_live_red_crossing", source_id="live", version=1,
+        scene_id="scene_techgar_red", source_id="live", version=1,
         data_json={
-            "scene_id": "scene_live_red_crossing", "source_id": "live",
+            "scene_id": "scene_techgar_red", "source_id": "live",
             "reference_size": [640, 480],
             "roads": {"A": {
                 "name": "A", "signal_group": "A", "center_boundary": [],
                 "direction_regions": [{
-                    "id": "A1", "name": "A1", "polygon": [[0, 0], [300, 0], [300, 480], [0, 480]],
+                    "id": "A1", "name": "A1",
+                    "polygon": [[0, 0], [300, 0], [300, 480], [0, 480]],
                     "allowed_direction": [0, 1],
                 }],
                 "stop_lines": [{"id": "stop_A1", "direction_region_id": "A1",
@@ -335,41 +193,44 @@ def test_live_vehicle_crossing_red_line_saves_current_frame_evidence(tmp_path):
             }},
         },
     )
+    class MovingTechGar:
+        def __init__(self):
+            self.calls = 0
+        def reset(self):
+            pass
+        def process(self, frame, timestamp_ms, frame_index):
+            y = 210 + 20 * min(self.calls, 5)
+            self.calls += 1
+            return ([{"track_id": 42, "track_source": "techgar",
+                      "vehicle_type": "vehicle", "bbox_xyxy": [100, y - 40, 150, y],
+                      "ground_point_xy": [125, y],
+                      "trajectory_xy": [[125, y - 20], [125, y]],
+                      "observation_kind": "detection"}], [640, 480])
+
     camera = DroidCamManager.get_instance()
     manager = LiveProcessingManager.get_instance()
     camera.connect("mock://droidcam")
     manager.stop()
-    previous_model = manager._model
-    previous_error = manager._model_error
-    previous_ready = manager._model_ready.is_set()
-    fake_model = FakeModel()
+    fake = MovingTechGar()
     try:
-        manager._model = (fake_model, "cpu")
-        manager._model_error = None
-        manager._model_ready.set()
-        with patch.object(manager, "prepare"), override_settings(MEDIA_ROOT=tmp_path):
-            run_id = manager.start(scene, phase="B_GREEN")["run_id"]
-            deadline = time.monotonic() + 4
+        with override_settings(MEDIA_ROOT=tmp_path), patch(
+            "monitor.services.live_processing_service.TechGarMotionAdapter",
+            return_value=fake,
+        ):
+            run_id = manager.start(scene, "B_GREEN")["run_id"]
+            deadline = time.monotonic() + 5
             event = None
             while time.monotonic() < deadline:
                 event = ViolationEventRecord.objects.filter(
-                    rule_run_id=run_id, rule_type="red_light",
-                ).first()
+                    rule_run_id=run_id, rule_type="red_light").first()
                 if event:
                     break
                 time.sleep(0.05)
             assert event is not None, manager.get_status()
             assert event.track_id == 42
-            # Track được xét từ frame thứ 3 và điểm chân là trung bình 3 frame,
-            # nên lần cắt vạch y=260 rơi vào frame 5 (box đáy y=290).
-            assert event.bbox_xyxy == [100, 250, 150, 290]
+            assert fake.calls >= 4
             assert (tmp_path / "evidence" / f"{event.event_id}_full.jpg").is_file()
             assert (tmp_path / "evidence" / f"{event.event_id}_crop.jpg").is_file()
-            assert fake_model.calls >= 4
     finally:
         manager.stop()
         camera.stop()
-        manager._model = previous_model
-        manager._model_error = previous_error
-        if not previous_ready:
-            manager._model_ready.clear()

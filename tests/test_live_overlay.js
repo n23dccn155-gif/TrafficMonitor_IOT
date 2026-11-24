@@ -44,17 +44,14 @@ player.setLiveFrame({ processing_size: [320, 240], tracks: [{
   track_id: 1, vehicle_type: "car", bbox_xyxy: [32, 24, 64, 48],
 }] });
 assert.deepEqual(boxes.at(-1), [80, 60, 80, 60]);
-const boxesBeforeMotion = boxes.length;
+const boxesBeforeTechGar = boxes.length;
 player.setLiveFrame({ processing_size: [320, 240], tracks: [{
-  track_id: -2, track_source: "motion", vehicle_type: "motion_candidate",
+  track_id: 2, track_source: "techgar", vehicle_type: "vehicle",
   observation_kind: "detection", bbox_xyxy: [32, 24, 64, 48],
 }] });
-assert.equal(boxes.length, boxesBeforeMotion);
-player.setLiveFrame({ processing_size: [320, 240], tracks: [], yolo_detections: [{
-  vehicle_type: "car", class_confidence: 0.82, bbox_xyxy: [32, 24, 64, 48],
-}] });
+assert.equal(boxes.length, boxesBeforeTechGar + 1);
 assert.deepEqual(boxes.at(-1), [80, 60, 80, 60]);
-assert.ok(labels.some((label) => label.includes("YOLO car 82%")));
+assert.ok(labels.some((label) => label.includes("ID:2")));
 player.setLiveMediaSize(640, 480);
 liveImg.naturalWidth = 0;
 liveImg.naturalHeight = 0;

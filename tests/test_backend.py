@@ -233,6 +233,7 @@ def test_tracking_runs_choose_complete_matching_video(client, tmp_path):
         run_dir.mkdir(parents=True)
         (run_dir / "summary.json").write_text(json.dumps({
             "source": source, "source_frames": 100, "processed_frames": processed,
+            "algorithm": "TechGAR motion + identity tracking",
         }), encoding="utf-8")
         (run_dir / "tracks.jsonl").write_text("", encoding="utf-8")
     with override_settings(BASE_DIR=tmp_path):
@@ -249,10 +250,10 @@ def test_tracking_runs_choose_complete_matching_video(client, tmp_path):
 
 
 @pytest.mark.django_db
-def test_tracking_runs_identify_yolo_and_mog2(client, tmp_path):
+def test_tracking_runs_only_show_techgar(client, tmp_path):
     runs_dir = tmp_path / "outputs" / "runs"
     for run_id, algorithm_data in (
-        ("run_001", {"weights": r"C:\models\yolov8n.pt"}),
+        ("run_001", {"algorithm": "TechGAR motion + identity tracking"}),
         ("run_002", {"algorithm": "MOG2 foreground + Kalman blob tracking"}),
     ):
         run_dir = runs_dir / run_id
@@ -265,5 +266,5 @@ def test_tracking_runs_identify_yolo_and_mog2(client, tmp_path):
     with override_settings(BASE_DIR=tmp_path):
         runs = client.get("/api/tracking/runs/?source=vd1.mp4").json()["runs"]
     assert [(run["run_id"], run["algorithm"]) for run in runs] == [
-        ("run_001", "3"), ("run_002", "2"),
+        ("run_001", "techgar"),
     ]

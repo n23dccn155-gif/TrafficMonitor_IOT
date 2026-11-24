@@ -1,5 +1,5 @@
 from monitor.services.input_optimizer import (
-    TrackFilter, box_to_frame, point_in_roi, roi_rect, scene_polygons, yolo_input_size,
+    TrackFilter, point_in_roi, roi_rect, scene_polygons,
 )
 from src.traffic_monitor.traffic_rules.schemas import SceneConfig
 
@@ -28,24 +28,6 @@ def test_roi_rect_adds_margin_and_clamps_to_frame():
 def test_roi_rect_falls_back_to_full_frame():
     assert roi_rect([], [640, 480]) == (0, 0, 640, 480)
     assert roi_rect([[[10, 10], [20, 10], [20, 20]]], [640, 480]) == (0, 0, 640, 480)
-
-
-def test_yolo_input_size_downscales_long_side_only():
-    assert yolo_input_size(1920, 1080) == (960, 540)
-    assert yolo_input_size(600, 1200) == (480, 960)
-    assert yolo_input_size(400, 300) == (400, 300)
-
-
-def test_box_to_frame_restores_scale_and_offset():
-    # ROI 200x100 tại (100, 50) được thu còn 100x50.
-    assert box_to_frame([10, 10, 20, 30], (100, 50), (100, 50, 300, 150)) == [120, 70, 140, 110]
-
-
-def test_point_in_roi():
-    square = [[0, 0], [10, 0], [10, 10], [0, 10]]
-    assert point_in_roi([5, 5], [square])
-    assert not point_in_roi([50, 5], [square])
-    assert point_in_roi([50, 5], [])
 
 
 def test_track_filter_confirms_after_min_frames_and_smooths():

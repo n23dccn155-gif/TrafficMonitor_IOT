@@ -1,6 +1,4 @@
-# Tested baseline versions. Install PyTorch for your CPU/CUDA first if needed.
-ultralytics==8.4.190
-supervision==0.26.0
+# TechGAR motion tracking and identity association; no neural model weights.
 lapx==0.9.4
 opencv-python==4.13.0.92
 scipy==1.17.1

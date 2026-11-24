@@ -8,7 +8,8 @@ from src.traffic_monitor.techgar_motion.vehicle_tracker import TrackStatus
 
 
 class TechGarMotionAdapter:
-    def __init__(self):
+    def __init__(self, max_width: int = 960):
+        self.max_width = max_width
         self.tracker = MotionVehicleTracker(
             min_visible_count=3,
             history_len=60,
@@ -29,13 +30,16 @@ class TechGarMotionAdapter:
         self.size = None
         self.frames_seen = 0
 
+    def reset(self):
+        self.__init__(self.max_width)
+
     def process(self, source_frame, timestamp_ms: int, frame_index: int) -> tuple[list[dict], list[int]]:
         source_height, source_width = source_frame.shape[:2]
-        width = min(960, source_width)
+        width = min(self.max_width, source_width)
         height = max(2, round(source_height * width / source_width))
-        frame = cv2.resize(source_frame, (width, height))
+        frame = cv2.resize(source_frame, (width, height)) if width != source_width else source_frame
         if self.size is not None and self.size != [width, height]:
-            self.__init__()
+            self.reset()
         self.size = [width, height]
         self.tracker.process_frame(frame, timestamp_s=timestamp_ms / 1000, source_frame_idx=frame_index)
         self.frames_seen += 1
@@ -50,14 +54,14 @@ class TechGarMotionAdapter:
             point = [int(track.cx), int(track.cy)]
             observation_kind = getattr(track, "observation_kind", "detection")
             tracks.append({
-                # Negative IDs keep TechGAR's IDs separate from ByteTrack IDs.
-                "track_id": -int(track.track_id),
-                "track_source": "motion",
-                "vehicle_type": "motion_candidate",
+                "track_id": int(track.track_id),
+                "track_source": "techgar",
+                "vehicle_type": "vehicle",
                 "class_confidence": 0.0,
                 "bbox_xyxy": box,
                 "ground_point_xy": point,
                 "trajectory_xy": [[int(px), int(py)] for px, py in track.history],
                 "observation_kind": observation_kind,
+                "track_quality": track.status.value,
             })
         return tracks, self.size

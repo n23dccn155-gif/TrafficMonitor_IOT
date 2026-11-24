@@ -140,7 +140,7 @@ class VideoCanvasPlayer {
   }
 
   _violationFor(track, nowMs) {
-    if (!track || track.track_source === "motion" || !this.violationEvents || !this.violationEvents.length) {
+    if (!track || !this.violationEvents || !this.violationEvents.length) {
       return null;
     }
     const matched = this.violationEvents.filter((ev) =>
@@ -254,7 +254,6 @@ class VideoCanvasPlayer {
 
     // Draw tracks
     for (const trk of closestFrame.tracks || []) {
-      if (this.liveMode && trk.track_source === "motion") continue;
       const [bx1, by1, bx2, by2] = trk.bbox_xyxy;
       const [x1, y1] = mapCoord(bx1, by1);
       const [x2, y2] = mapCoord(bx2, by2);
@@ -276,13 +275,13 @@ class VideoCanvasPlayer {
           : (violation.rule_type === "wrong_way" ? "Ngược Chiều" : violation.rule_type === "lane_encroachment" ? "Lấn Vạch" : "Vượt Đèn Đỏ");
         label = `ID:${trk.track_id} ${trk.vehicle_type || "vehicle"} · ${ruleLabel}`;
       } else {
-        if (trk.track_source === "motion") color = "#a855f7"; // motion candidate
+        if (trk.track_source === "techgar") color = "#a855f7"; // motion candidate
         else if (trk.vehicle_type === "motorcycle") color = "#06b6d4"; // cyan
         else if (trk.vehicle_type === "car") color = "#10b981"; // green
         else if (trk.vehicle_type === "bus") color = "#f59e0b"; // yellow
 
-        label = trk.track_source === "motion"
-          ? `ID:M${Math.abs(trk.track_id)} ${trk.observation_kind === "detection" ? "vật thể chuyển động" : "đang giữ ID"}`
+        label = trk.track_source === "techgar"
+          ? `ID:${trk.track_id} ${trk.observation_kind === "detection" ? "vật thể chuyển động" : "đang giữ ID"}`
           : `ID:${trk.track_id} ${trk.vehicle_type}`;
       }
 
@@ -325,20 +324,6 @@ class VideoCanvasPlayer {
         this.ctx.setLineDash([]);
       }
     }
-    // A YOLO box without a ByteTrack ID is visible, but never enters the rule engine.
-    for (const detection of closestFrame.yolo_detections || []) {
-      const [bx1, by1, bx2, by2] = detection.bbox_xyxy;
-      const [x1, y1] = mapCoord(bx1, by1);
-      const [x2, y2] = mapCoord(bx2, by2);
-      const label = `YOLO ${detection.vehicle_type} ${Math.round(detection.class_confidence * 100)}%`;
-      this.ctx.strokeStyle = "#f97316";
-      this.ctx.lineWidth = 2;
-      this.ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-      this.ctx.font = "bold 12px sans-serif";
-      this.ctx.fillStyle = "#f97316";
-      this.ctx.fillRect(x1, Math.max(0, y1 - 18), this.ctx.measureText(label).width + 6, 18);
-      this.ctx.fillStyle = "#ffffff";
-      this.ctx.fillText(label, x1 + 3, Math.max(12, y1 - 4));
-    }
+
   }
 }

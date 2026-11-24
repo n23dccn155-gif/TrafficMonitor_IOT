@@ -1,7 +1,7 @@
 # TrafficMonitor IoT
 
 Hệ thống giám sát vi phạm giao thông thông minh từ camera cố định phục vụ đồ án IoT.  
-Tích hợp: **Xử lý video AI (YOLO/ByteTrack/MOG2) ➔ Django Web giám sát ➔ Canvas Editor quy ước tĩnh ➔ Bộ quy tắc vi phạm (Rule Engine) ➔ Tín hiệu đèn ngã tư ➔ Trích xuất ảnh bằng chứng (toàn cảnh + crop) ➔ Phê duyệt vi phạm**.
+Tích hợp: **TechGAR theo dõi chuyển động và giữ ID xe ➔ Django Web giám sát ➔ Canvas Editor quy ước tĩnh ➔ Bộ quy tắc vi phạm (Rule Engine) ➔ Tín hiệu đèn ngã tư ➔ Trích xuất ảnh bằng chứng (toàn cảnh + crop) ➔ Phê duyệt vi phạm**.
 
 ---
 
@@ -44,7 +44,7 @@ TrafficMonitor_IoT/
 ## 2. Yêu cầu
 
 - Windows 10/11, Python **3.12 hoặc 3.13** 64-bit.
-- Internet khi dùng model lần đầu (tự tải `yolov8n.pt`, `yolo11s.pt` vào `weights/`).
+- TechGAR chạy bằng OpenCV, không tải trọng số mô hình.
 - Nếu xử lý MP4, cần tự cung cấp `vd3.mp4` (hoặc `vd1.mp4`, `vd2.mp4`) vì video mẫu **không nằm trong repo**. Chế độ DroidCam không cần video mẫu.
 - Arduino Uno R3 + cáp USB — *tùy chọn*, chỉ cần khi muốn điều khiển đèn sa bàn thật.
 
@@ -57,13 +57,11 @@ cd TrafficMonitor_IoT
 python --version
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install torch==2.12.0 torchvision==0.27.0 --index-url https://download.pytorch.org/whl/cpu
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pip install -r requirements-web.txt
-.\.venv\Scripts\python.exe -c "import torch, torchvision; from torchvision.ops import nms; print(torch.__version__, torchvision.__version__)"
 ```
 
-Lệnh trên dùng bản PyTorch CPU để có cặp `torch`/`torchvision` tương thích. Nếu chạy CUDA, chọn lệnh cài đúng phiên bản GPU trên [trang cài đặt PyTorch](https://pytorch.org/get-started/locally/) trước khi cài các requirements. Không tạo venv với `--system-site-packages`: nó có thể lấy nhầm `torchvision` của Python toàn máy và báo `operator torchvision::nms does not exist`.
+Nhánh `hiep` không cần PyTorch, YOLO hoặc file trọng số. Mã TechGAR đã nằm trong `src/traffic_monitor/techgar_motion/`.
 
 Nếu dùng MP4, chép video vào thư mục dữ liệu (thay đường dẫn ví dụ bằng file của bạn):
 
@@ -85,7 +83,7 @@ Khởi tạo cơ sở dữ liệu:
 .\.venv\Scripts\python.exe -m pytest tests/ -v
 ```
 
-Nếu đã chép `vd3.mp4`: **55 passed**. Nếu chỉ dùng camera trực tiếp và chưa có video mẫu: **54 passed, 1 skipped**.
+Chạy toàn bộ test Python bằng lệnh trên và test giao diện bằng `node --test tests/*.js`.
 
 ---
 
@@ -105,9 +103,7 @@ Giao diện chạy theo 3 bước:
 2. **Vẽ quy ước tĩnh** — trên một frame chụp, vẽ *vùng Đường A*, *tim Đường A*, *Stop A1*, *Stop A2* và tương tự cho Đường B. Editor tự chia làn, suy ra chiều xe và tạo vùng giữa ngã tư.
 3. **Giám sát tự động** — bấm **Lưu và Chạy** ở bước vẽ. Với MP4 mẫu, web chạy nhận diện, phát video kèm box/ID và có thể quét lỗi sai chiều/lấn làn; không chấm vượt đèn đỏ vì video không có lịch sử pha đèn đồng bộ. Nút **Quét Vi Phạm** dùng để quét lại. Với DroidCam, web nhận diện trực tiếp và dùng pha đèn hiện tại để xét vượt đèn đỏ. Bảng đèn nằm bên phải; danh sách vi phạm có ảnh toàn cảnh và ảnh crop để duyệt.
 
-Web ưu tiên bản nhận diện **YOLOv8n** hoàn chỉnh cho MP4. Bản MOG2 cũ vẫn chọn được để so sánh chuyển động, nhưng nhãn xe của MOG2 là `unknown` vì nó không phân loại ô tô/xe máy.
-
-YOLOv8n phát hiện tốt hơn với xe thật. Xe mô hình nhỏ có thể không được nhận ra dù camera và web chạy đúng; cần thử trên clip sa bàn và huấn luyện model với ảnh xe mô hình nếu muốn đánh giá vi phạm đáng tin cậy.
+Web tự chạy **TechGAR** cho MP4 và DroidCam. TechGAR phát hiện vật thể chuyển động bằng trừ nền/biến thiên khung hình và duy trì ID qua các khung hình. Nó không phân loại ô tô, xe máy hay xe buýt: nhãn chung là `vehicle`. Xe đứng lâu, thay đổi sáng hoặc che khuất có thể gây bỏ sót hay đổi ID; cần đánh giá trên clip thực tế của nhóm.
 
 ### 5.2. Menu console OpenCV
 
@@ -115,7 +111,7 @@ YOLOv8n phát hiện tốt hơn với xe thật. Xe mô hình nhỏ có thể kh
 .\.venv\Scripts\python.exe menu.py
 ```
 
-hoặc nhấp đúp **`run_menu.bat`**. Chọn nguồn (video file hoặc DroidCam) → chọn thuật toán (YOLO11s chia ô / MOG2 + Kalman / YOLOv8n + ByteTrack) → chọn preset tốc độ → mở cửa sổ OpenCV trực tiếp.
+hoặc nhấp đúp **`run_menu.bat`**. Chọn nguồn (video file hoặc DroidCam) → chạy TechGAR → chọn preset tốc độ → mở cửa sổ OpenCV trực tiếp.
 
 ### 5.3. Kết nối Arduino Uno (tùy chọn)
 
@@ -148,7 +144,7 @@ Các file nặng hoặc sinh ra lúc chạy bị `.gitignore`, không đẩy lê
 |---|---|---|
 | `data/raw/`, `data/derived/` | Video mẫu MP4 | Hàng trăm MB |
 | `outputs/` | Kết quả chạy, ảnh chứng cứ, media | Sinh ra lúc chạy |
-| `weights/` | `yolov8n.pt`, `yolo11s.pt` | Tự tải lại được |
+| `weights/` | Không dùng trên nhánh `hiep` | Không cần trọng số |
 | `db.sqlite3` | Cơ sở dữ liệu SQLite | Máy nào tự `migrate` |
 | `.venv/`, `__pycache__/`, `.pytest_cache/` | Môi trường & cache | Máy nào tự tạo |
 
@@ -156,9 +152,9 @@ Các file nặng hoặc sinh ra lúc chạy bị `.gitignore`, không đẩy lê
 
 ## 8. Luồng vận hành chi tiết trên Web
 
-1. **Phát video và phủ box/ID** — chọn hoặc tải MP4, vẽ quy ước đường rồi bấm **Lưu và Chạy**. Web tự chạy YOLOv8n + ByteTrack, nạp box/ID và quỹ đạo lên canvas; có thể tua video nhờ HTTP Range 206.
+1. **Phát video và phủ box/ID** — chọn hoặc tải MP4, vẽ quy ước đường rồi bấm **Lưu và Chạy**. Web chạy TechGAR, nạp box/ID và quỹ đạo lên canvas; có thể tua video nhờ HTTP Range 206.
 
-2. **Canvas Editor** — vẽ quy ước đường trên frame chụp; phần vẽ là quy ước để xét luật, không huấn luyện AI. Box YOLO không có ID chỉ dùng kiểm tra, không dùng chấm vi phạm; chỉ xe có ID ByteTrack và độ tin cậy đủ cao mới vào bộ quy tắc.
+2. **Canvas Editor** — vẽ quy ước đường trên frame chụp; phần vẽ dùng để xét luật. Chỉ track TechGAR đã xác nhận ID mới vào bộ quy tắc; loại xe là `vehicle` vì tracker không phân loại lớp xe.
 
 3. **Bảng đèn tín hiệu** — Đường A và Đường B hiển thị trạng thái; hệ thống không cho cả hai cùng xanh. Chuyển tab **Thủ công** để bấm đèn hoặc nút **Cả hai đỏ**; tab **Tự động** cho phép đặt thời gian xanh/vàng. Đèn chạy độc lập khi xem MP4 mẫu; chỉ pha đèn đồng bộ với camera trực tiếp được dùng để chấm vượt đèn đỏ.
 
