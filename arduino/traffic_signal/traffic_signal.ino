@@ -1,14 +1,14 @@
 // TrafficMonitor IoT: Uno R3, USB Serial at 9600 baud.
 // A: red D2, yellow D3, green D4. B: red D5, yellow D6, green D7.
 // Commands: STATUS, AUTO <aGreen> <aYellow> <bGreen> <bYellow>,
-//           MANUAL <A_GREEN|A_YELLOW|B_GREEN|B_YELLOW|ALL_RED>.
+//           MANUAL <A_GREEN|A_YELLOW|B_GREEN|B_YELLOW|ALL_YELLOW|ALL_RED>.
 // Response: STATE <phase> <remaining_ms> <aGreen> <aYellow> <bGreen> <bYellow> <mode>
 #include <stdio.h>
 #include <string.h>
 
 const byte pins[] = {2, 3, 4, 5, 6, 7};
-const char *phases[] = {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_RED"};
-enum Phase { A_GREEN, A_YELLOW, B_GREEN, B_YELLOW, ALL_RED };
+const char *phases[] = {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_RED", "ALL_YELLOW"};
+enum Phase { A_GREEN, A_YELLOW, B_GREEN, B_YELLOW, ALL_RED, ALL_YELLOW };
 Phase phase = ALL_RED;
 Phase pendingPhase = ALL_RED;
 bool automatic = true;  // Start the original 5s green / 2s yellow cycle without the web.
@@ -29,6 +29,7 @@ void showPhase(Phase next) {
   if (next == B_GREEN) { digitalWrite(2, HIGH); digitalWrite(7, HIGH); }
   if (next == B_YELLOW) { digitalWrite(2, HIGH); digitalWrite(6, HIGH); }
   if (next == ALL_RED) { digitalWrite(2, HIGH); digitalWrite(5, HIGH); }
+  if (next == ALL_YELLOW) { digitalWrite(3, HIGH); digitalWrite(6, HIGH); }
 }
 
 void requestPhase(Phase next) {
@@ -51,7 +52,7 @@ void reportState() {
   if (transitioning) {
     unsigned long elapsed = millis() - phaseStarted;
     remaining = elapsed >= clearanceMs ? 0 : clearanceMs - elapsed;
-  } else if (automatic && phase != ALL_RED) {
+  } else if (automatic && phase != ALL_RED && phase != ALL_YELLOW) {
     unsigned long elapsed = millis() - phaseStarted;
     remaining = elapsed >= durations[phase] ? 0 : durations[phase] - elapsed;
   }
@@ -79,7 +80,7 @@ void handleCommand(char *line) {
     return;
   }
   if (strncmp(line, "MANUAL ", 7) == 0) {
-    for (byte i = 0; i < 5; ++i) {
+    for (byte i = 0; i < 6; ++i) {
       if (strcmp(line + 7, phases[i]) == 0) {
         automatic = false;
         requestPhase((Phase)i);
@@ -116,7 +117,7 @@ void loop() {
   if (transitioning && elapsed >= clearanceMs) {
     transitioning = false;
     showPhase(pendingPhase);
-  } else if (automatic && !transitioning && phase != ALL_RED && elapsed >= durations[phase]) {
+  } else if (automatic && !transitioning && phase != ALL_RED && phase != ALL_YELLOW && elapsed >= durations[phase]) {
     requestPhase((Phase)((phase + 1) % 4));
   }
 }

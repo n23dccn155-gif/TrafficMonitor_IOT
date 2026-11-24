@@ -200,6 +200,7 @@ def main() -> None:
 
     elapsed = time.perf_counter() - started
     summary = {
+        "algorithm": "YOLOv8n + ByteTrack",
         "source": args.source if is_live else str(Path(args.source).resolve()),
         "weights": str(weights_path.resolve()),
         "device": device,

@@ -3,6 +3,7 @@
  * Supports:
  * 1. Timed Mode (Tự động theo giây): Configurable A/B green & yellow durations with live countdown.
  * 2. Manual Mode (Chuyển thủ công): Direct clicking on bulbs with glowing white border highlight and safe interlocking.
+ *    Clicking the yellow bulb on both roads (ALL_YELLOW) shows both directions yellow at once.
  */
 class SignalPanel {
   constructor() {
@@ -62,10 +63,7 @@ class SignalPanel {
       this.timedInputsBox.style.display = "flex";
       this.manualHintText.style.display = "none";
       if (container) container.classList.remove("mode-manual");
-      if (typeof app !== "undefined" && app?.currentStep === 3 && app.selectedSourceType === "mp4") {
-        this.stopTimedCycle();
-        this.syncToVideoTime(app.player.video.currentTime || 0);
-      } else this.startTimedCycle();
+      this.startTimedCycle();
       if (this.hardwareEnabled) this.sendHardwareAuto().catch((e) => this.showHardwareStatus(`Lỗi Arduino: ${e.message}`));
     } else {
       this.tabTimed.classList.remove("active");
@@ -75,11 +73,7 @@ class SignalPanel {
       if (container) container.classList.add("mode-manual");
       this.stopTimedCycle();
       this._clearAllCounts();
-      if (typeof app !== "undefined" && app?.selectedSourceType === "mp4") {
-        this.manualChanges = [{ at_video_ms: 0, phase: "A_GREEN", seq: 1 }];
-        this.setPhase(this.currentPhase);
-      }
-      if (this.hardwareEnabled && (typeof app === "undefined" || app?.selectedSourceType !== "mp4")) {
+      if (this.hardwareEnabled) {
         this.hardwareRequest({ action: "manual", phase: this.currentPhase }).catch((e) => this.showHardwareStatus(`Lỗi Arduino: ${e.message}`));
       }
     }
@@ -96,7 +90,6 @@ class SignalPanel {
     this.bGreenSec = Math.min(120, Math.max(3, bg));
     this.bYellowSec = Math.min(10, Math.max(1, by));
 
-    this.saveTimelineToBackend();
     if (this.hardwareEnabled) {
       this.stopTimedCycle();
       if (this.mode === "timed") this.sendHardwareAuto().catch((e) => this.showHardwareStatus(`Lỗi Arduino: ${e.message}`));
@@ -104,10 +97,7 @@ class SignalPanel {
     }
     if (this.mode === "timed") {
       this.setPhase("A_GREEN", this.aGreenSec);
-      if (typeof app !== "undefined" && app?.currentStep === 3 && app.selectedSourceType === "mp4") {
-        this.stopTimedCycle();
-        this.syncToVideoTime(app.player.video.currentTime || 0);
-      } else this.startTimedCycle();
+      this.startTimedCycle();
     }
   }
 
@@ -180,15 +170,16 @@ class SignalPanel {
 
   setPhase(phase, durationSec = null) {
     if (this.hardwareEnabled) {
-      if (this.mode === "manual") this.hardwareRequest({ action: "manual", phase }).catch(() => {});
+      if (this.mode === "manual") {
+        // Update locally right away so fast clicks chain (e.g. A yellow then B yellow
+        // becomes ALL_YELLOW); the Uno reply overwrites this with the real state.
+        this.currentPhase = phase;
+        this._renderBulbs();
+        this.hardwareRequest({ action: "manual", phase }).catch(() => {});
+      }
       return;
     }
     this.currentPhase = phase;
-    if (this.mode === "manual" && typeof app !== "undefined" && app?.currentStep === 3
-        && app.selectedSourceType === "mp4") {
-      const atMs = Math.round((app.player.video.currentTime || 0) * 1000);
-      this.manualChanges.push({ at_video_ms: atMs, phase, seq: this.manualChanges.length + 1 });
-    }
     if (typeof app !== "undefined" && app) app.onSignalPhaseChanged(phase);
     if (durationSec !== null) {
       this.remainingSec = durationSec;
@@ -207,7 +198,9 @@ class SignalPanel {
       if (color === "green") {
         this.setPhase("A_GREEN");
       } else if (color === "yellow") {
-        this.setPhase("A_YELLOW");
+        // Yellow on both roads: B already yellow => BOTH_YELLOW; again => back to B only.
+        if (this.currentPhase === "ALL_YELLOW") this.setPhase("B_YELLOW");
+        else this.setPhase(this.currentPhase === "B_YELLOW" ? "ALL_YELLOW" : "A_YELLOW");
       } else if (color === "red") {
         // Switching A to Red safely gives green to B
         this.setPhase("B_GREEN");
@@ -216,7 +209,8 @@ class SignalPanel {
       if (color === "green") {
         this.setPhase("B_GREEN");
       } else if (color === "yellow") {
-        this.setPhase("B_YELLOW");
+        if (this.currentPhase === "ALL_YELLOW") this.setPhase("A_YELLOW");
+        else this.setPhase(this.currentPhase === "A_YELLOW" ? "ALL_YELLOW" : "B_YELLOW");
       } else if (color === "red") {
         // Switching B to Red safely gives green to A
         this.setPhase("A_GREEN");
@@ -284,6 +278,15 @@ class SignalPanel {
           if (this.countARed) this.countARed.textContent = isTimed && this.hardwareEnabled ? String(this.remainingSec + 1) : secStr;
         }
         break;
+      case "ALL_YELLOW":
+        if (this.bulbAYellow) this.bulbAYellow.classList.add("active");
+        if (this.bulbBYellow) this.bulbBYellow.classList.add("active");
+        if (isTimed && this.remainingSec > 0) {
+          if (this.countAYellow) this.countAYellow.textContent = secStr;
+          if (this.countBYellow) this.countBYellow.textContent = secStr;
+        }
+        break;
+
       case "ALL_RED":
         if (this.bulbARed) this.bulbARed.classList.add("active");
         if (this.bulbBRed) this.bulbBRed.classList.add("active");

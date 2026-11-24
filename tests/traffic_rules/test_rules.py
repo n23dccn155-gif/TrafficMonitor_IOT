@@ -247,6 +247,47 @@ def test_red_light_pass_on_own_yellow_no_violation(sample_scene, sample_timeline
     assert not any(event.rule_type == "red_light" for event in events)
 
 
+def test_red_light_all_yellow_permits_both_signal_groups(sample_scene):
+    """ALL_YELLOW (both directions yellow together) is a permitted phase for every group."""
+    from copy import deepcopy
+
+    timeline = SignalTimeline(
+        timeline_id="all_yellow_timeline",
+        version=1,
+        video_id="test_video.mp4",
+        mode="manual_annotation",
+        changes=[
+            SignalChange(at_video_ms=0, phase="A_GREEN", source="manual_annotation", seq=1),
+            SignalChange(at_video_ms=1000, phase="ALL_YELLOW", source="manual_annotation", seq=2),
+            SignalChange(at_video_ms=4000, phase="B_GREEN", source="manual_annotation", seq=3),
+        ],
+    )
+
+    for group in ("A", "B"):
+        scene = deepcopy(sample_scene)
+        road = scene.roads["A"]
+        road.signal_group = group
+        scene.roads = {group: road}
+
+        engine = RuleEngine(scene=scene, timeline=timeline, rule_run_id=f"all_yellow_{group}")
+        events = []
+        y = 200
+        for frame_idx in range(40):
+            t_ms = 1400 + frame_idx * 50  # crossing lands inside the ALL_YELLOW window
+            y += 10
+            obs = TrackObservation(
+                track_id=707,
+                vehicle_type="car",
+                bbox_xyxy=[200, y - 60, 300, y],
+                ground_point_xy=[250, y],
+                trajectory_xy=[[250, y]],
+                observation_kind="detection",
+            )
+            frame = TrackFrame("CAM_01", frame_idx, t_ms, [1000, 1000], [obs])
+            events.extend(engine.process_frame(frame))
+        assert events == [], f"ALL_YELLOW must be permitted for group {group}: {events}"
+
+
 def test_red_light_uses_estimated_crossing_time_at_phase_change(sample_scene, sample_timeline):
     from src.traffic_monitor.traffic_rules.rules.red_light import RedLightRule
 

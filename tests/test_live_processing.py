@@ -86,6 +86,8 @@ def test_live_phase_uses_change_time_not_last_processed_frame():
     )
     manager.set_phase("B_GREEN")
     assert manager.timeline.changes[-1].at_video_ms >= 4900
+    manager.set_phase("ALL_YELLOW", source="arduino")
+    assert manager.timeline.changes[-1].phase == "ALL_YELLOW"
     manager.set_phase("UNKNOWN", source="arduino")
     assert manager.timeline.changes[-1].phase == "UNKNOWN"
 
@@ -146,6 +148,10 @@ def test_live_worker_processes_shared_camera_frames(client):
         data_json={"scene_id": "scene_live_worker", "source_id": "live", "reference_size": [640, 480], "roads": {}},
     )
     manager = LiveProcessingManager.get_instance()
+    manager.stop()
+    previous_model = manager._model
+    previous_error = manager._model_error
+    previous_ready = manager._model_ready.is_set()
     class OversizedBoxes(list):
         id = np.array([1])
 
@@ -161,7 +167,10 @@ def test_live_worker_processes_shared_camera_frames(client):
         predictor=None,
     )
     try:
-        with patch("ultralytics.YOLO", return_value=fake_model):
+        manager._model = (fake_model, "cpu")
+        manager._model_error = ""
+        manager._model_ready.set()
+        with patch.object(manager, "prepare"):
             response = client.post(
                 "/api/live/processing/",
                 data=json.dumps({"scene_config_id": scene.scene_id, "phase": "A_GREEN"}),
@@ -182,6 +191,10 @@ def test_live_worker_processes_shared_camera_frames(client):
     finally:
         manager.stop()
         camera.stop()
+        manager._model = previous_model
+        manager._model_error = previous_error
+        if not previous_ready:
+            manager._model_ready.clear()
 
 
 @pytest.mark.django_db(transaction=True)

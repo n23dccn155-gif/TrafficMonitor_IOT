@@ -53,6 +53,33 @@ async function main() {
   });
   assert.equal(document.getElementById("bulbA_red").classes.has("active"), true);
   assert.equal(document.getElementById("bulbB_red").classes.has("active"), true);
+
+  // Manual BOTH_YELLOW: with the board connected the clicks must reach the Uno.
+  const base = actions.length;
+  panel.onBulbClick("A", "yellow");
+  assert.deepEqual(actions[base], { action: "manual", phase: "A_YELLOW" });
+  panel.onBulbClick("B", "yellow");
+  assert.deepEqual(actions[base + 1], { action: "manual", phase: "ALL_YELLOW" });
+
+  // Same clicks in web-only mode light both yellow bulbs (and no red bulb).
+  panel.hardwareEnabled = false;
+  panel.currentPhase = "A_YELLOW";
+  panel.onBulbClick("B", "yellow");
+  assert.equal(panel.currentPhase, "ALL_YELLOW");
+  assert.equal(document.getElementById("bulbA_yellow").classes.has("active"), true);
+  assert.equal(document.getElementById("bulbB_yellow").classes.has("active"), true);
+  assert.equal(document.getElementById("bulbA_red").classes.has("active"), false);
+  assert.equal(document.getElementById("bulbB_red").classes.has("active"), false);
+  assert.equal(document.getElementById("bulbA_green").classes.has("active"), false);
+  assert.equal(document.getElementById("bulbB_green").classes.has("active"), false);
+  // Clicking one yellow again drops back to that road alone.
+  panel.onBulbClick("A", "yellow");
+  assert.equal(panel.currentPhase, "B_YELLOW");
+  // A green click leaves BOTH_YELLOW safely (never two greens).
+  panel.setPhase("ALL_YELLOW");
+  panel.onBulbClick("A", "green");
+  assert.equal(panel.currentPhase, "A_GREEN");
   console.log("Arduino UI connect and automatic timing OK");
+  console.log("manual ALL_YELLOW phase OK");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

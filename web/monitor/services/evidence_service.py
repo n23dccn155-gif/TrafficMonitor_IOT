@@ -9,6 +9,16 @@ from typing import List, Optional, Tuple
 import cv2
 from django.conf import settings
 
+RULE_LABELS = {
+    "wrong_way": "Ngược Chiều",
+    "lane_encroachment": "Lấn Vạch",
+    "red_light": "Vượt Đèn Đỏ",
+}
+
+
+def violation_rule_label(rule_type: str) -> str:
+    return RULE_LABELS.get(rule_type, "Vượt Đèn Đỏ")
+
 
 def create_violation_evidence(
     video_path: str | Path,
@@ -54,10 +64,10 @@ def create_violation_evidence(
 
     # 1. Full image with box and label
     annotated_frame = frame.copy()
-    box_color = (0, 0, 255) if "red" in rule_type or "wrong" in rule_type else (0, 165, 255)
+    box_color = (0, 0, 255)
     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 3)
 
-    label = f"ID:{track_id} [{rule_type.upper()}] @ {timestamp_ms}ms"
+    label = f"ID:{track_id} · {violation_rule_label(rule_type)} @ {timestamp_ms}ms"
     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
     cv2.rectangle(annotated_frame, (x1, max(0, y1 - th - 8)), (x1 + tw + 6, y1), box_color, -1)
     cv2.putText(

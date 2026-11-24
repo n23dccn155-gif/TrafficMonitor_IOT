@@ -190,6 +190,9 @@
           <button id="arduinoConnectButton" class="btn-outline" type="button" onclick="signalPanel.toggleHardware()">Kết nối</button>
           <span id="arduinoStatus" role="status">Mô phỏng trên web</span>
         </div>
+        <div id="signalContextNote" style="font-size:0.72rem; color:var(--text-muted); margin-bottom:0.5rem;">
+          Pha đèn chỉ được dùng để xét vượt đèn đỏ khi có dữ liệu đồng bộ với camera.
+        </div>
 
         <!-- Mode Switch Tabs -->
         <div class="signal-mode-tabs">
@@ -222,7 +225,7 @@
 
         <!-- Manual Hint -->
         <div id="manualHintText" style="display:none; font-size:0.72rem; color:var(--text-muted); text-align:center; margin-bottom:0.4rem;">
-          👉 Bấm trực tiếp vào bóng đèn màu để chuyển pha (Bên này Xanh thì bên kia tự chuyển Đỏ).
+          👉 Bấm trực tiếp vào bóng đèn màu để chuyển pha (Bên này Xanh thì bên kia tự chuyển Đỏ). Bấm vàng ở cả ĐƯỜNG A và ĐƯỜNG B để bật pha cả hai cùng vàng.
         </div>
 
         <button id="manualAllRedButton" class="btn-outline" type="button" onclick="signalPanel.setPhase('ALL_RED')" style="display:none; margin:5px auto;" title="Bật cả hai đèn đỏ">Cả hai đỏ</button>

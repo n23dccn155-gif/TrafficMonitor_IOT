@@ -19,6 +19,8 @@ class VideoCanvasPlayer {
     this.scene = null;
     this.liveMode = false;
     this.liveFrame = null;
+    this.liveMediaSize = null;
+    this.violationEvents = [];
 
     this._bindEvents();
     this._startRenderLoop();
@@ -34,8 +36,11 @@ class VideoCanvasPlayer {
   resizeCanvas() {
     if (!this.video || !this.canvas) return;
     const rect = this.canvas.parentElement.getBoundingClientRect();
-    this.canvas.width = rect.width;
-    this.canvas.height = rect.height;
+    const width = Math.round(rect.width);
+    const height = Math.round(rect.height);
+    if (this.canvas.width === width && this.canvas.height === height) return;
+    this.canvas.width = width;
+    this.canvas.height = height;
     if (this.liveMode) this._renderOverlay();
   }
 
@@ -47,11 +52,23 @@ class VideoCanvasPlayer {
   setLiveMode(enabled) {
     this.liveMode = enabled;
     this.liveFrame = null;
+    this.liveMediaSize = null;
     if (enabled) this.setRun(null);
     this._renderOverlay();
   }
 
+  setLiveMediaSize(width, height) {
+    if (!width || !height) return;
+    if (this.liveMediaSize?.[0] === width && this.liveMediaSize?.[1] === height) return;
+    this.liveMediaSize = [width, height];
+    if (this.liveMode) this._renderOverlay();
+  }
+
   setLiveFrame(frame) {
+    if (this.liveMode && !frame && !this.liveFrame) return;
+    if (this.liveMode && frame && this.liveFrame && frame.frame_index != null &&
+        frame.frame_index === this.liveFrame.frame_index &&
+        frame.segment_id === this.liveFrame.segment_id) return;
     this.liveFrame = frame;
     if (frame?.processing_size) this.processingSize = frame.processing_size;
     if (this.liveMode) this._renderOverlay();
@@ -63,8 +80,8 @@ class VideoCanvasPlayer {
     const height = this.canvas.height;
     if (!sourceW || !sourceH || !width || !height) return [0, 0];
     const liveImg = document.getElementById("liveMonitorImg");
-    const mediaW = this.liveMode ? liveImg?.naturalWidth : this.video.videoWidth;
-    const mediaH = this.liveMode ? liveImg?.naturalHeight : this.video.videoHeight;
+    const mediaW = this.liveMode ? (this.liveMediaSize?.[0] || liveImg?.naturalWidth) : this.video.videoWidth;
+    const mediaH = this.liveMode ? (this.liveMediaSize?.[1] || liveImg?.naturalHeight) : this.video.videoHeight;
     if (!mediaW || !mediaH) return [0, 0];
     const scale = Math.min(width / mediaW, height / mediaH);
     return [
@@ -110,6 +127,7 @@ class VideoCanvasPlayer {
     this.trackFrames.clear();
     this.minBufferedMs = Infinity;
     this.maxBufferedMs = -1;
+    this.violationEvents = [];
     this._checkBufferWindow(true);
   }
 
@@ -119,6 +137,21 @@ class VideoCanvasPlayer {
 
   seek(timestampMs) {
     this.video.currentTime = timestampMs / 1000.0;
+  }
+
+  _violationFor(track, nowMs) {
+    if (!track || track.track_source === "motion" || !this.violationEvents || !this.violationEvents.length) {
+      return null;
+    }
+    const matched = this.violationEvents.filter((ev) =>
+      ev.track_id === track.track_id &&
+      ev.review_status !== "dismissed" &&
+      (nowMs == null || nowMs >= ev.event_timestamp_ms)
+    );
+    if (!matched.length) return null;
+    return matched.reduce((latest, ev) =>
+      !latest || (ev.event_timestamp_ms || 0) > (latest.event_timestamp_ms || 0) ? ev : latest
+    , null);
   }
 
   async _checkBufferWindow(force = false) {
@@ -193,10 +226,12 @@ class VideoCanvasPlayer {
 
     if (this.badge) this.badge.style.display = "none";
 
+    const nowMs = this.liveMode ? closestFrame?.video_timestamp_ms : currentMs;
+
     // Compute letterbox/pillarbox viewport mapping
     const liveImg = document.getElementById("liveMonitorImg");
-    const vW = this.liveMode ? (liveImg?.naturalWidth || 0) : (this.video.videoWidth || 0);
-    const vH = this.liveMode ? (liveImg?.naturalHeight || 0) : (this.video.videoHeight || 0);
+    const vW = this.liveMode ? (this.liveMediaSize?.[0] || liveImg?.naturalWidth || 0) : (this.video.videoWidth || 0);
+    const vH = this.liveMode ? (this.liveMediaSize?.[1] || liveImg?.naturalHeight || 0) : (this.video.videoHeight || 0);
     if (!vW || !vH) return;
     const cW = width;
     const cH = height;
@@ -226,24 +261,39 @@ class VideoCanvasPlayer {
       const bw = x2 - x1;
       const bh = y2 - y1;
 
-      // Color based on vehicle type
+      const violation = this._violationFor(trk, nowMs);
+
+      // Color and line width based on vehicle type or violation
       let color = "#3b82f6"; // blue
-      if (trk.track_source === "motion") color = "#a855f7"; // motion candidate
-      else if (trk.vehicle_type === "motorcycle") color = "#06b6d4"; // cyan
-      else if (trk.vehicle_type === "car") color = "#10b981"; // green
-      else if (trk.vehicle_type === "bus") color = "#f59e0b"; // yellow
+      let lineWidth = 2;
+      let label = "";
+
+      if (violation) {
+        color = "#ef4444"; // red for violation
+        lineWidth = 3;
+        const ruleLabel = typeof violationRuleLabel === "function"
+          ? violationRuleLabel(violation.rule_type)
+          : (violation.rule_type === "wrong_way" ? "Ngược Chiều" : violation.rule_type === "lane_encroachment" ? "Lấn Vạch" : "Vượt Đèn Đỏ");
+        label = `ID:${trk.track_id} ${trk.vehicle_type || "vehicle"} · ${ruleLabel}`;
+      } else {
+        if (trk.track_source === "motion") color = "#a855f7"; // motion candidate
+        else if (trk.vehicle_type === "motorcycle") color = "#06b6d4"; // cyan
+        else if (trk.vehicle_type === "car") color = "#10b981"; // green
+        else if (trk.vehicle_type === "bus") color = "#f59e0b"; // yellow
+
+        label = trk.track_source === "motion"
+          ? `ID:M${Math.abs(trk.track_id)} ${trk.observation_kind === "detection" ? "vật thể chuyển động" : "đang giữ ID"}`
+          : `ID:${trk.track_id} ${trk.vehicle_type}`;
+      }
 
       // Draw bounding box
       this.ctx.strokeStyle = color;
-      this.ctx.lineWidth = 2;
+      this.ctx.lineWidth = lineWidth;
       if (trk.observation_kind && trk.observation_kind !== "detection") this.ctx.setLineDash([5, 4]);
       this.ctx.strokeRect(x1, y1, bw, bh);
       this.ctx.setLineDash([]);
 
       // Draw label badge
-      const label = trk.track_source === "motion"
-        ? `ID:M${Math.abs(trk.track_id)} ${trk.observation_kind === "detection" ? "vật thể chuyển động" : "đang giữ ID"}`
-        : `ID:${trk.track_id} ${trk.vehicle_type}`;
       this.ctx.font = "bold 12px sans-serif";
       const textMetrics = this.ctx.measureText(label);
       this.ctx.fillStyle = color;

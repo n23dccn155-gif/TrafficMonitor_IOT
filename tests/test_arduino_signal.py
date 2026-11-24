@@ -15,8 +15,30 @@ def test_parse_uno_state():
         "phase": "B_GREEN", "remaining_ms": 4210, "mode": "auto",
         "a_green": 5, "a_yellow": 2, "b_green": 7, "b_yellow": 2,
     }
+    assert parse_state("STATE ALL_YELLOW 0 5 2 5 2 MANUAL\r\n") == {
+        "phase": "ALL_YELLOW", "remaining_ms": 0, "mode": "manual",
+        "a_green": 5, "a_yellow": 2, "b_green": 5, "b_yellow": 2,
+    }
     with pytest.raises(ValueError):
         parse_state("STATE A_GREEN 5000 5 2 5 2")
+
+
+def test_arduino_api_accepts_all_yellow_phase():
+    """Manual BOTH_YELLOW must reach the Uno as MANUAL ALL_YELLOW."""
+    client = Client()
+    with patch("monitor.views.ArduinoSignalService.get_instance") as get_service:
+        service = get_service.return_value
+        service.command.return_value = {
+            "connected": True, "port": "COM3", "phase": "ALL_YELLOW",
+            "remaining_ms": 0, "mode": "manual", "a_green": 5,
+            "a_yellow": 2, "b_green": 5, "b_yellow": 2,
+        }
+        response = client.post("/api/arduino/signal/", data=json.dumps({
+            "action": "manual", "phase": "ALL_YELLOW",
+        }), content_type="application/json")
+        assert response.status_code == 200
+        assert response.json()["phase"] == "ALL_YELLOW"
+        service.command.assert_called_once_with("MANUAL ALL_YELLOW")
 
 
 def test_arduino_api_validates_before_sending():

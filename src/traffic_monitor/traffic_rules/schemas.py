@@ -161,7 +161,7 @@ class SceneConfig:
 @dataclass
 class SignalChange:
     at_video_ms: int
-    phase: str  # "A_GREEN", "A_YELLOW", "ALL_RED", "B_GREEN", "B_YELLOW"
+    phase: str  # "A_GREEN", "A_YELLOW", "ALL_RED", "ALL_YELLOW", "B_GREEN", "B_YELLOW"
     source: str = "simulation"
     seq: int = 1
 

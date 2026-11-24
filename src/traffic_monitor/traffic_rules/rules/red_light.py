@@ -89,7 +89,8 @@ class RedLightRule(BaseRule):
 
                     # Yellow is a separate phase; crossing on one's own yellow
                     # must not be reported as a red-light violation.
-                    if current_phase in {f"{road.signal_group}_GREEN", f"{road.signal_group}_YELLOW"}:
+                    # ALL_YELLOW means both directions show yellow, so either group may pass.
+                    if current_phase in {f"{road.signal_group}_GREEN", f"{road.signal_group}_YELLOW", "ALL_YELLOW"}:
                         hist["passed_on_permitted_phase"].add(stop_line.id)
                         return None
                     else:

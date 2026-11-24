@@ -103,7 +103,7 @@ class LiveProcessingManager:
         camera = DroidCamManager.get_instance()
         if not camera.get_status()["connected"]:
             raise ValueError("Camera chưa có khung hình mới. Hãy kết nối lại trước khi chạy nhận diện.")
-        if phase not in {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_RED", "UNKNOWN"}:
+        if phase not in {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_YELLOW", "ALL_RED", "UNKNOWN"}:
             raise ValueError("Tín hiệu đèn không hợp lệ")
         self.stop()
         self.prepare()
@@ -139,7 +139,7 @@ class LiveProcessingManager:
             self.timeline = None
 
     def set_phase(self, phase: str, source: str = "live"):
-        if phase not in {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_RED", "UNKNOWN"}:
+        if phase not in {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_YELLOW", "ALL_RED", "UNKNOWN"}:
             raise ValueError("Tín hiệu đèn không hợp lệ")
         with self._lock:
             if self.timeline is None or self.status not in {"STARTING", "RUNNING"}:

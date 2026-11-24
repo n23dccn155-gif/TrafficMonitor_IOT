@@ -243,10 +243,12 @@ Cấu trúc `SignalTimeline`:
     ```json
     {
       "tracking_run_id": "run_20261105_093319_774",
+      "source_id": "vd3.mp4",
       "scene_config_id": "scene_vd3_v1",
-      "signal_timeline_id": "timeline_vd3_v1"
+      "signal_timeline_id": null
     }
     ```
+  - `signal_timeline_id` là tùy chọn. Với MP4 mẫu không có pha đèn được ghi đồng bộ, để trống: chỉ xét các quy tắc không cần tín hiệu đèn. Chỉ truyền timeline khi có dữ liệu pha thực sự khớp với video; không dùng pha Uno hiện tại cho video cũ.
   - Gọi Rule Engine (Subagent C) xử lý `tracks.jsonl`, sinh `events.jsonl`.
   - Gọi Evidence Service (Subagent A) cắt ảnh toàn cảnh + crop cho mỗi event.
   - Lưu vào cơ sở dữ liệu `ViolationEvent`.

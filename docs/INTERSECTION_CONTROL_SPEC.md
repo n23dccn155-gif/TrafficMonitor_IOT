@@ -30,6 +30,9 @@ Giao diện có nút **“Cho đường A đi”**, **“Cho đường B đi”*
 | `ALL_RED`  | Đỏ       | Đỏ       |
 | `B_GREEN`  | Đỏ       | Xanh       |
 | `B_YELLOW` | Đỏ       | Vàng      |
+| `ALL_YELLOW` | Vàng   | Vàng      |
+
+Pha `ALL_YELLOW` (cả hai đường cùng vàng) **chỉ dùng ở chế độ Thủ công**: bấm vàng ở đèn Đường A rồi bấm vàng ở đèn Đường B (bấm lại một bên để trở về vàng một chiều). Chế độ **Tự động theo giây** không dùng pha này và chu kỳ vẫn `A xanh → A vàng → B xanh → B vàng`. Khi cả hai cùng vàng, xe đường nào cắt vạch dừng cũng **không** bị ghi vi phạm đèn đỏ, vì chiều của xe đang ở vàng.
 
 Khi chuyển từ A xanh sang B xanh, bộ điều khiển đi qua `A_YELLOW → ALL_RED → B_GREEN`; chiều ngược lại tương tự. Thời lượng vàng và cả hai đỏ là **tham số demo**, chưa lấy số giây của đường thật. Không cho hai nhóm xung đột cùng xanh. Nếu Uno còn nguồn nhưng mất lệnh/khởi động lại, firmware đưa cả hai nhóm về đỏ; Web vẫn đánh dấu `UNKNOWN` cho đến khi có ACK mới. Nếu mất cả nguồn USB, không thể giả định LED còn sáng. Ý tưởng khoảng chuyển pha được mô tả trong [FHWA Traffic Signal Timing Manual](https://ops.fhwa.dot.gov/publications/fhwahop08024/chapter5.htm); tài liệu này chỉ để tham khảo cấu trúc bộ điều khiển, không dùng làm quy định xử lý giao thông Việt Nam.
 

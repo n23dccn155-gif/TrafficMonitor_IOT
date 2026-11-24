@@ -40,7 +40,7 @@ from .services.video_service import (
 
 
 def index_view(request):
-    """Main 75/25 surveillance monitoring dashboard."""
+    """Main surveillance monitoring dashboard."""
     return render(request, "dashboard.html")
 
 
@@ -313,15 +313,16 @@ def rules_run_api(request):
 
     scene = SceneConfig.from_dict(scene_record.to_dict())
 
-    # Load signal timeline
+    # Recorded video has no signal evidence unless a synchronized timeline is supplied.
     timeline = None
-    timeline_record = SignalTimelineRecord.objects.filter(
-        timeline_id=signal_timeline_id, video_id=scene_record.source_id
-    ).order_by("-version").first()
-    if timeline_record:
+    timeline_record = None
+    if signal_timeline_id:
+        timeline_record = SignalTimelineRecord.objects.filter(
+            timeline_id=signal_timeline_id, video_id=scene_record.source_id
+        ).order_by("-version").first()
+        if not timeline_record:
+            return JsonResponse({"error": "Chưa có lịch sử pha đèn cho video đã chọn"}, status=400)
         timeline = SignalTimeline.from_dict(timeline_record.to_dict())
-    else:
-        return JsonResponse({"error": "Chưa có lịch sử pha đèn cho video đã chọn"}, status=400)
 
     # Create RuleRunRecord
     rule_run_id = f"rulerun_{tracking_run_id}_s{scene_record.version}_t{timeline_record.version if timeline_record else 0}"

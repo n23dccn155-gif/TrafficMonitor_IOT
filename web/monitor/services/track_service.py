@@ -12,6 +12,19 @@ from django.conf import settings
 from ..models import TrackingJob
 
 
+def _run_algorithm(run_id: str, summary: dict) -> str:
+    """Identify old CLI outputs as well as jobs launched by this web app."""
+    name = str(summary.get("algorithm", "")).lower()
+    weights = ntpath.basename(str(summary.get("weights", ""))).lower()
+    if "yolov8" in name or "yolov8" in weights:
+        return "3"
+    if "yolo11" in name or "yolo11" in weights:
+        return "1"
+    if "mog2" in name:
+        return "2"
+    return TrackingJob.objects.filter(job_id=run_id).values_list("algorithm", flat=True).first() or "unknown"
+
+
 def list_tracking_runs(source_name: str) -> List[Dict[str, Any]]:
     """Return finished local tracking outputs for the selected MP4 only."""
     runs_dir = settings.BASE_DIR / "outputs" / "runs"
@@ -32,6 +45,7 @@ def list_tracking_runs(source_name: str) -> List[Dict[str, Any]]:
                         else TrackingJob.objects.filter(job_id=run_dir.name, status="DONE").exists())
             runs.append({
                 "run_id": run_dir.name,
+                "algorithm": _run_algorithm(run_dir.name, summary),
                 "processed_frames": processed_frames,
                 "source_frames": source_frames,
                 "processed_seconds": summary.get("processed_seconds_of_video"),
@@ -39,7 +53,7 @@ def list_tracking_runs(source_name: str) -> List[Dict[str, Any]]:
             })
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             continue
-    return sorted(runs, key=lambda run: (run["complete"], run["run_id"]), reverse=True)
+    return sorted(runs, key=lambda run: (run["complete"], run["algorithm"] == "3", run["run_id"]), reverse=True)
 
 
 def find_run_output_dir(run_id: str) -> Optional[Path]:

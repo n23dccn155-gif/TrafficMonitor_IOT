@@ -6,7 +6,7 @@ import threading
 import time
 
 
-PHASES = {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_RED"}
+PHASES = {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_YELLOW", "ALL_RED"}
 PORT_PATTERN = re.compile(r"COM[1-9][0-9]*\Z", re.IGNORECASE)
 
 

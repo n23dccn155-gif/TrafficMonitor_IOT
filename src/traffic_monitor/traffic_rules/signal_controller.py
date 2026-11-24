@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .schemas import SignalChange, SignalTimeline
 
-VALID_PHASES = {"A_GREEN", "A_YELLOW", "ALL_RED", "B_GREEN", "B_YELLOW"}
+VALID_PHASES = {"A_GREEN", "A_YELLOW", "ALL_RED", "B_GREEN", "B_YELLOW", "ALL_YELLOW"}
 
 
 class TimelineGenerator:

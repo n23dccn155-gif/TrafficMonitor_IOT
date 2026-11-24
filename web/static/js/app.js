@@ -30,16 +30,13 @@ class Application {
     this.editor = new RoadConventionEditor("editorCanvas");
     this.eventsManager = new ViolationEventsManager(this.player);
 
-    // Sync video time with signal countdown / timeline
+    // Recorded footage has no synchronized signal data; show only its playback time.
     if (this.player.video) {
       this.player.video.addEventListener("timeupdate", () => {
         const cur = (this.player.video.currentTime || 0).toFixed(1);
         const dur = (this.player.video.duration || 0).toFixed(1);
         const display = document.getElementById("timecodeDisplay");
         if (display) display.textContent = `${cur}s / ${dur}s`;
-        if (this.currentStep === 3 && this.selectedSourceType === "mp4") {
-          this.signalPanel.syncToVideoTime(this.player.video.currentTime || 0);
-        }
       });
     }
 
@@ -71,17 +68,7 @@ class Application {
       s1.classList.add("completed");
       s2.classList.add("active");
     } else if (step === 3) {
-      if (this.signalPanel?.mode === "timed") {
-        if (this.selectedSourceType === "live") this.signalPanel.startTimedCycle();
-        else {
-          this.signalPanel.stopTimedCycle();
-          this.signalPanel.syncToVideoTime(0);
-        }
-      } else if (this.selectedSourceType === "mp4") {
-        this.signalPanel.manualChanges = [
-          { at_video_ms: 0, phase: this.signalPanel.currentPhase, seq: 1 },
-        ];
-      }
+      if (this.signalPanel?.mode === "timed") this.signalPanel.startTimedCycle();
       s1.classList.add("completed");
       s2.classList.add("completed");
       s3.classList.add("active");
@@ -121,8 +108,12 @@ class Application {
       const statusBadge = document.getElementById("monitoringStatusBadge");
       const rulesButton = document.getElementById("rulesRunButton");
       const trackingControl = document.getElementById("trackingControl");
+      const signalContextNote = document.getElementById("signalContextNote");
       if (rulesButton) rulesButton.style.display = this.selectedSourceType === "live" ? "none" : "inline-flex";
       if (trackingControl) trackingControl.style.display = this.selectedSourceType === "live" ? "none" : "inline-flex";
+      if (signalContextNote) signalContextNote.textContent = this.selectedSourceType === "mp4"
+        ? "Video mẫu không có dữ liệu pha đèn: bảng đèn chạy độc lập, không dùng để chấm vượt đèn đỏ."
+        : "Camera trực tiếp: pha đèn được dùng để xét vượt đèn đỏ.";
 
       if (this.selectedSourceType === "live") {
         // Live Camera Mode (DroidCam)
@@ -215,16 +206,18 @@ class Application {
     const data = await res.json();
     if (source !== this.currentVideo) return;
     const runs = data.runs || [];
-    this.currentTrackingRunId = runs.find((run) => run.complete)?.run_id || null;
+    this.availableRuns = runs;
+    this.currentTrackingRunId = runs.find((run) => run.complete && run.algorithm === "3")?.run_id || null;
     const select = document.getElementById("trackingRunSelect");
     if (select) {
       select.innerHTML = "";
-      if (!this.currentTrackingRunId) select.add(new Option("Chưa có bản nhận diện đầy đủ", ""));
+      if (!this.currentTrackingRunId) select.add(new Option("Chưa có bản YOLOv8n đầy đủ", ""));
       for (const run of runs) {
         const coverage = run.source_frames
           ? ` / ${run.source_frames} khung hình` : " khung hình";
         const label = run.complete ? "đầy đủ" : "chưa đủ";
-        select.add(new Option(`${run.run_id} (${run.processed_frames}${coverage}, ${label})`, run.run_id));
+        const algorithm = { "3": "YOLOv8n", "2": "MOG2 (không phân loại xe)", "1": "YOLO11s" }[run.algorithm] || "thuật toán chưa rõ";
+        select.add(new Option(`${algorithm} · ${run.run_id} (${run.processed_frames}${coverage}, ${label})`, run.run_id));
       }
       select.value = this.currentTrackingRunId || "";
     }
@@ -357,31 +350,42 @@ class Application {
 
   startLivePreview(liveImg) {
     this.stopLivePreview();
+    const token = this.livePreviewToken;
     let firstFrame = true;
-    const next = (delayMs) => {
-      if (this.currentStep !== 3 || this.selectedSourceType !== "live") return;
-      this.liveInterval = setTimeout(() => {
-        liveImg.src = `/api/live/preview/?t=${Date.now()}`;
-      }, delayMs);
+    const next = () => {
+      if (token !== this.livePreviewToken || this.currentStep !== 3 || this.selectedSourceType !== "live") return;
+      const frame = new Image();
+      this.liveProbe = frame;
+      frame.onload = () => {
+        if (token !== this.livePreviewToken) return;
+        this.player.setLiveMediaSize(frame.naturalWidth, frame.naturalHeight);
+        liveImg.src = frame.src;
+        liveImg.style.visibility = "visible";
+        if (firstFrame) {
+          this.player.resizeCanvas();
+          firstFrame = false;
+        }
+        this.liveInterval = setTimeout(next, 250);
+      };
+      frame.onerror = () => {
+        if (token !== this.livePreviewToken) return;
+        // Keep the last good image visible during a transient camera error.
+        this.liveInterval = setTimeout(next, 500);
+      };
+      frame.src = `/api/live/preview/?t=${Date.now()}`;
     };
-    liveImg.onload = () => {
-      liveImg.style.visibility = "visible";
-      if (firstFrame) {
-        this.player.resizeCanvas();
-        firstFrame = false;
-      }
-      next(250);
-    };
-    liveImg.onerror = () => {
-      liveImg.style.visibility = "hidden";
-      next(500);
-    };
-    liveImg.src = `/api/live/preview/?t=${Date.now()}`;
+    next();
   }
 
   stopLivePreview() {
+    this.livePreviewToken = (this.livePreviewToken || 0) + 1;
     if (this.liveInterval) clearTimeout(this.liveInterval);
     this.liveInterval = null;
+    if (this.liveProbe) {
+      this.liveProbe.onload = null;
+      this.liveProbe.onerror = null;
+      this.liveProbe = null;
+    }
     const liveImg = document.getElementById("liveMonitorImg");
     if (liveImg) {
       liveImg.onload = null;
@@ -529,11 +533,6 @@ class Application {
       return;
     }
     try {
-      this.signalPanel.videoFilename = this.currentVideo;
-      this.signalPanel.timelineId = `timeline_${this.currentVideo}`;
-      if (!await this.signalPanel.saveTimelineToBackend()) {
-        throw new Error("Không lưu được lịch sử pha đèn");
-      }
       if (badge) badge.textContent = "Đang quét vi phạm...";
       const res = await fetch("/api/rules/run/", {
         method: "POST",
@@ -542,14 +541,13 @@ class Application {
           tracking_run_id: this.currentTrackingRunId,
           source_id: this.currentVideo,
           scene_config_id: this.currentSceneId,
-          signal_timeline_id: this.signalPanel ? this.signalPanel.timelineId : "timeline_vd3_v1",
         }),
       });
       const data = await res.json();
       if (res.ok) {
         this.currentRuleRunId = data.rule_run_id;
         await this.eventsManager.loadEvents(this.currentRuleRunId);
-        if (badge) badge.textContent = `Đã quét xong · ${data.events_count} vi phạm`;
+        if (badge) badge.textContent = `Đã quét xong · ${data.events_count} vi phạm (không chấm vượt đèn đỏ)`;
       } else {
         throw new Error(data.error || "Quét vi phạm thất bại");
       }
@@ -563,6 +561,9 @@ class Application {
     this.currentTrackingRunId = runId || null;
     this.currentRuleRunId = null;
     this.eventsManager.reset();
+    const run = this.availableRuns?.find((item) => item.run_id === runId);
+    const badge = document.getElementById("monitoringStatusBadge");
+    if (badge && run?.algorithm === "2") badge.textContent = "MOG2 chỉ bám vật chuyển động; nhãn xe là unknown. Chọn YOLOv8n để phân loại xe.";
     if (this.player) {
       this.player.setRun(this.currentTrackingRunId);
     }

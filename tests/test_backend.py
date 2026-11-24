@@ -21,7 +21,7 @@ from monitor.models import (
     ViolationEventRecord,
 )
 from monitor.services.droidcam_service import DroidCamManager
-from monitor.services.evidence_service import create_violation_evidence
+from monitor.services.evidence_service import create_violation_evidence, violation_rule_label
 from monitor.services.video_service import get_safe_video_path
 
 
@@ -60,11 +60,35 @@ def test_scene_config_and_timeline_apis(client):
     assert res.json()["version"] == 1
 
 
+@pytest.mark.django_db
+def test_sample_video_rules_do_not_require_signal_timeline(client, tmp_path):
+    """A sample MP4 can be scanned without inventing traffic-light phases."""
+    source = "sample.mp4"
+    run_dir = tmp_path / "outputs" / "runs" / "sample_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(json.dumps({"source": source}), encoding="utf-8")
+    (run_dir / "tracks.jsonl").write_text("", encoding="utf-8")
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / source).write_bytes(b"sample")
+    scene = SceneConfigRecord.objects.create(
+        scene_id="sample_scene", source_id=source, data_json={"roads": {}},
+    )
+    payload = {"tracking_run_id": "sample_run", "source_id": source, "scene_config_id": scene.scene_id}
+    with override_settings(BASE_DIR=tmp_path, DATA_RAW_DIR=raw_dir):
+        res = client.post("/api/rules/run/", data=json.dumps(payload), content_type="application/json")
+    assert res.status_code == 200
+    assert res.json()["events_count"] == 0
+    assert RuleRunRecord.objects.get(rule_run_id=res.json()["rule_run_id"]).signal_timeline is None
+
+
 
 @pytest.mark.django_db
-def test_video_http_range_streaming(client):
+def test_video_http_range_streaming(client, tmp_path):
     """Test HTTP 206 Partial Content Range streaming for video seeking."""
-    res = client.get("/api/videos/vd3.mp4/stream/", HTTP_RANGE="bytes=0-1023")
+    (tmp_path / "sample.mp4").write_bytes(bytes(range(256)) * 8)
+    with override_settings(DATA_RAW_DIR=tmp_path):
+        res = client.get("/api/videos/sample.mp4/stream/", HTTP_RANGE="bytes=0-1023")
     assert res.status_code == 206
     assert "Content-Range" in res.headers
     assert res.headers["Content-Range"].startswith("bytes 0-1023/")
@@ -109,6 +133,14 @@ def test_evidence_service_generates_full_and_crop_images():
     assert crop_disk.is_file()
     assert full_disk.stat().st_size > 0
     assert crop_disk.stat().st_size > 0
+
+
+def test_violation_rule_label_translations():
+    """Verify backend violation rule label translations match frontend labels."""
+    assert violation_rule_label("red_light") == "Vượt Đèn Đỏ"
+    assert violation_rule_label("wrong_way") == "Ngược Chiều"
+    assert violation_rule_label("lane_encroachment") == "Lấn Vạch"
+    assert violation_rule_label("unknown_rule") == "Vượt Đèn Đỏ"
 
 
 @pytest.mark.django_db
@@ -214,3 +246,24 @@ def test_tracking_runs_choose_complete_matching_video(client, tmp_path):
         }), content_type="application/json")
         assert rejected.status_code == 400
         assert "không thuộc video" in rejected.json()["error"]
+
+
+@pytest.mark.django_db
+def test_tracking_runs_identify_yolo_and_mog2(client, tmp_path):
+    runs_dir = tmp_path / "outputs" / "runs"
+    for run_id, algorithm_data in (
+        ("run_001", {"weights": r"C:\models\yolov8n.pt"}),
+        ("run_002", {"algorithm": "MOG2 foreground + Kalman blob tracking"}),
+    ):
+        run_dir = runs_dir / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.json").write_text(json.dumps({
+            "source": r"C:\data\vd1.mp4", "source_frames": 100,
+            "processed_frames": 100, **algorithm_data,
+        }), encoding="utf-8")
+        (run_dir / "tracks.jsonl").write_text("", encoding="utf-8")
+    with override_settings(BASE_DIR=tmp_path):
+        runs = client.get("/api/tracking/runs/?source=vd1.mp4").json()["runs"]
+    assert [(run["run_id"], run["algorithm"]) for run in runs] == [
+        ("run_001", "3"), ("run_002", "2"),
+    ]

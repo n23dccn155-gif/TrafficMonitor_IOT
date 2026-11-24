@@ -6,9 +6,10 @@ const path = require("node:path");
 const strokes = [];
 const boxes = [];
 const labels = [];
+let clears = 0;
 let points = [];
 const ctx = {
-  clearRect() {}, beginPath() { points = []; },
+  clearRect() { clears++; }, beginPath() { points = []; },
   moveTo(x, y) { points.push([x, y]); },
   lineTo(x, y) { points.push([x, y]); },
   closePath() {}, fill() {},
@@ -54,4 +55,13 @@ player.setLiveFrame({ processing_size: [320, 240], tracks: [], yolo_detections: 
 }] });
 assert.deepEqual(boxes.at(-1), [80, 60, 80, 60]);
 assert.ok(labels.some((label) => label.includes("YOLO car 82%")));
+player.setLiveMediaSize(640, 480);
+liveImg.naturalWidth = 0;
+liveImg.naturalHeight = 0;
+player.setLiveFrame({ frame_index: 7, segment_id: "seg0", processing_size: [320, 240], tracks: [] });
+assert.deepEqual(strokes.at(-1).points, [[0, 0], [800, 600]]);
+const clearsBefore = clears;
+player.setLiveFrame({ frame_index: 7, segment_id: "seg0", processing_size: [320, 240], tracks: [] });
+player.resizeCanvas();
+assert.equal(clears, clearsBefore);
 console.log("live overlay mapping, opacity and detection boxes OK");

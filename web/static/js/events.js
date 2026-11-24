@@ -3,6 +3,20 @@
  * Displays the latest violation with enlarged vehicle crop image (with box & ID).
  * Populates an internal scrollable history list that seeks video on click.
  */
+
+function violationRuleLabel(ruleType) {
+  if (ruleType === "wrong_way") return "Ngược Chiều";
+  if (ruleType === "lane_encroachment") return "Lấn Vạch";
+  return "Vượt Đèn Đỏ";
+}
+
+if (typeof window !== "undefined") {
+  window.violationRuleLabel = violationRuleLabel;
+}
+if (typeof global !== "undefined") {
+  global.violationRuleLabel = violationRuleLabel;
+}
+
 class ViolationEventsManager {
   constructor(player) {
     this.player = player;
@@ -36,6 +50,9 @@ class ViolationEventsManager {
       const data = await res.json();
       if (requestId !== this.requestId) return;
       this.events = data.events || [];
+      if (this.player) {
+        this.player.violationEvents = this.events;
+      }
       this.render();
     } catch (err) {
       console.error("Error loading events:", err);
@@ -45,6 +62,9 @@ class ViolationEventsManager {
   reset() {
     this.requestId++;
     this.events = [];
+    if (this.player) {
+      this.player.violationEvents = [];
+    }
     this.activeEventId = null;
     this.render();
   }
@@ -83,14 +103,12 @@ class ViolationEventsManager {
         item.className = "history-item" + (ev.event_id === this.activeEventId ? " active" : "");
 
         let badgeClass = "badge-red";
-        let ruleName = "Vượt Đèn Đỏ";
         if (ev.rule_type === "wrong_way") {
           badgeClass = "badge-yellow";
-          ruleName = "Ngược Chiều";
         } else if (ev.rule_type === "lane_encroachment") {
           badgeClass = "badge-blue";
-          ruleName = "Lấn Vạch";
         }
+        const ruleName = violationRuleLabel(ev.rule_type);
 
         item.innerHTML = `
           <div style="display:flex; align-items:center; gap:8px;">
@@ -133,14 +151,12 @@ class ViolationEventsManager {
     }
 
     let badgeClass = "badge-red";
-    let ruleName = "VƯỢT ĐÈN ĐỎ";
     if (ev.rule_type === "wrong_way") {
       badgeClass = "badge-yellow";
-      ruleName = "ĐI NGƯỢC CHIỀU";
     } else if (ev.rule_type === "lane_encroachment") {
       badgeClass = "badge-blue";
-      ruleName = "LẤN VẠCH PHÂN CÁCH";
     }
+    const ruleName = violationRuleLabel(ev.rule_type).toUpperCase();
 
     if (this.ruleBadge) {
       this.ruleBadge.textContent = ruleName;

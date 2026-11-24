@@ -25,29 +25,23 @@ vm.runInThisContext(fs.readFileSync(path.join(__dirname, "../web/static/js/signa
 
 async function main() {
   const panel = new SignalPanel();
-  panel.syncToVideoTime(0);
+  assert.equal(savedTimeline, undefined);
   assert.equal(panel.currentPhase, "A_GREEN");
-  panel.syncToVideoTime(15);
+  panel._advanceToNextPhase();
   assert.equal(panel.currentPhase, "A_YELLOW");
-  panel.syncToVideoTime(18);
+  panel._advanceToNextPhase();
   assert.equal(panel.currentPhase, "B_GREEN");
-  panel.syncToVideoTime(33);
+  panel._advanceToNextPhase();
   assert.equal(panel.currentPhase, "B_YELLOW");
-  panel.syncToVideoTime(36);
+  panel._advanceToNextPhase();
   assert.equal(panel.currentPhase, "A_GREEN");
 
   panel.setMode("manual");
   app.player.video.currentTime = 10;
   panel.setPhase("B_GREEN");
-  panel.syncToVideoTime(0);
-  assert.equal(panel.currentPhase, "A_GREEN");
-  panel.syncToVideoTime(10);
+  app.player.video.currentTime = 30;
   assert.equal(panel.currentPhase, "B_GREEN");
-  await panel.saveTimelineToBackend();
-  assert.equal(savedTimeline.mode, "manual");
-  assert.deepEqual(savedTimeline.changes.at(-1), {
-    at_video_ms: 10000, phase: "B_GREEN", seq: panel.manualChanges.length,
-  });
-  console.log("video-time signal phases and manual changes OK");
+  assert.equal(savedTimeline, undefined);
+  console.log("independent signal cycle and manual control OK");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });
