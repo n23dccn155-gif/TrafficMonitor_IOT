@@ -19,6 +19,8 @@ MIN_TRACK_FRAMES = 3    # track phải xuất hiện ít nhất N frame mới đ
 SMOOTH_POINTS = 3       # số điểm chân dùng để tính trung bình trượt
 TRAJECTORY_POINTS = 60
 FORGET_AFTER_FRAMES = 150
+STITCH_MAX_GAP_MS = 1500  # track mất lâu hơn mức này thì không nối ID nữa
+STITCH_MIN_PX = 40        # bán kính nối ID tối thiểu quanh vị trí dự đoán
 
 
 def scene_polygons(scene, frame_size) -> list[list[list[int]]]:
@@ -69,30 +71,75 @@ def point_in_roi(point, polygons) -> bool:
 
 
 class TrackFilter:
-    """Giữ trạng thái từng track ID để quyết định track nào đủ tin cậy cho Rule Engine."""
+    """Giữ trạng thái từng track để quyết định track nào đủ tin cậy cho Rule Engine.
+
+    ByteTrack hay đổi ID khi xe bị che hoặc đi nhanh hơn số frame xử lý được. Khi một
+    ID mới xuất hiện gần chỗ dự đoán của một track vừa mất, ID mới được nối vào track
+    cũ (giữ ID ổn định, tuổi và quỹ đạo) để luật không mất lịch sử của xe.
+    """
 
     def __init__(self, min_frames: int = MIN_TRACK_FRAMES, smooth_points: int = SMOOTH_POINTS):
         self.min_frames = min_frames
         self.smooth_points = smooth_points
         self._frame = 0
-        self._tracks: dict[int, dict] = {}
+        self._tracks: dict[int, dict] = {}   # ID ổn định -> trạng thái
+        self._alias: dict[int, int] = {}     # ID của ByteTrack -> ID ổn định
+        self._spare_id = 1_000_000           # ID riêng khi ID của ByteTrack đã thuộc xe khác
 
     def clear(self):
         self._tracks.clear()
+        self._alias.clear()
 
     def next_frame(self):
         """Gọi mỗi frame; quên các track đã mất lâu để bộ nhớ không tăng mãi."""
         self._frame += 1
-        stale = [tid for tid, t in self._tracks.items() if self._frame - t["last_seen"] > FORGET_AFTER_FRAMES]
+        stale = {tid for tid, t in self._tracks.items() if self._frame - t["last_seen"] > FORGET_AFTER_FRAMES}
         for tid in stale:
             del self._tracks[tid]
+        self._alias = {raw: tid for raw, tid in self._alias.items() if tid not in stale}
 
-    def update(self, track_id: int, vehicle_type: str, point: list[int]) -> dict:
-        track = self._tracks.setdefault(track_id, {
+    def _find_lost_track(self, point, bbox, now_ms):
+        """Track vừa mất (không thấy ở frame này) gần vị trí dự đoán nhất, hoặc None."""
+        x1, y1, x2, y2 = bbox
+        gate = max(STITCH_MIN_PX, 1.5 * ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
+        best_id, best_dist = None, gate
+        for tid, track in self._tracks.items():
+            gap_ms = now_ms - track.get("last_ms", now_ms)
+            if track["last_seen"] == self._frame or not 0 < gap_ms <= STITCH_MAX_GAP_MS:
+                continue
+            # Dự đoán theo vận tốc của 2 lần thấy gần nhất (px/ms).
+            px, py = track["last_point"]
+            vx, vy = track["velocity"]
+            dist = ((point[0] - (px + vx * gap_ms)) ** 2 + (point[1] - (py + vy * gap_ms)) ** 2) ** 0.5
+            if dist <= best_dist:
+                best_id, best_dist = tid, dist
+        return best_id
+
+    def update(self, track_id: int, vehicle_type: str, point: list[int],
+               bbox: list[int] | None = None, now_ms: int | None = None) -> dict:
+        stable_id = self._alias.get(track_id)
+        if stable_id is None:
+            stitched = self._find_lost_track(point, bbox, now_ms) if bbox and now_ms is not None else None
+            stable_id = track_id if stitched is None else stitched
+            if stitched is None and track_id in self._tracks:
+                # ByteTrack bắt lại ID cũ nhưng ID ổn định đó đã được nối sang xe khác.
+                self._spare_id += 1
+                stable_id = self._spare_id
+            # Một track ổn định chỉ gắn với một ID ByteTrack: ID cũ nếu quay lại sẽ thành xe mới.
+            self._alias = {raw: tid for raw, tid in self._alias.items() if tid != stable_id}
+            self._alias[track_id] = stable_id
+        track = self._tracks.setdefault(stable_id, {
             "age": 0, "classes": Counter(),
             "raw": deque(maxlen=self.smooth_points),
             "trajectory": deque(maxlen=TRAJECTORY_POINTS),
+            "velocity": (0.0, 0.0),
         })
+        if now_ms is not None and "last_ms" in track and now_ms > track["last_ms"]:
+            dt = now_ms - track["last_ms"]
+            track["velocity"] = ((point[0] - track["last_point"][0]) / dt, (point[1] - track["last_point"][1]) / dt)
+        if now_ms is not None:
+            track["last_ms"] = now_ms
+        track["last_point"] = point
         track["age"] += 1
         track["last_seen"] = self._frame
         track["classes"][vehicle_type] += 1
@@ -101,6 +148,7 @@ class TrackFilter:
         smoothed = [round(sum(p[0] for p in track["raw"]) / count), round(sum(p[1] for p in track["raw"]) / count)]
         track["trajectory"].append(smoothed)
         return {
+            "track_id": stable_id,
             "confirmed": track["age"] >= self.min_frames,
             "vehicle_type": track["classes"].most_common(1)[0][0],
             "ground_point_xy": smoothed,

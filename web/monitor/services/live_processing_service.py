@@ -14,11 +14,12 @@ from django.db import close_old_connections
 from src.traffic_monitor.model_assets import ensure_official_weights
 from src.traffic_monitor.traffic_rules.engine import RuleEngine
 from src.traffic_monitor.traffic_rules.geometry import scale_bbox
-from src.traffic_monitor.traffic_rules.schemas import SceneConfig, SignalChange, SignalTimeline, TrackFrame
+from src.traffic_monitor.traffic_rules.schemas import SceneConfig, SignalTimeline, TrackFrame
 
 from ..models import RuleRunRecord, SceneConfigRecord, ViolationEventRecord
 from .droidcam_service import DroidCamManager
 from .arduino_signal_service import ArduinoSignalService
+from .live_signal_timer import LiveSignalTimer, parse_signal_config
 from .input_optimizer import (
     TrackFilter, box_to_frame, point_in_roi, roi_rect, scene_polygons, yolo_input_size,
 )
@@ -53,8 +54,11 @@ class LiveProcessingManager:
         self.status = "IDLE"
         self.error = ""
         self.latest_tracks = None
-        self.phase = "UNKNOWN"
         self.timeline = None
+        self.signal_timer = None
+        self.signal_warning = ""
+        self.event_count = 0
+        self._signal_thread = None
         self._start_monotonic_ms = 0
         self.last_result_monotonic_ms = 0
         self._model_lock = threading.Lock()
@@ -99,63 +103,103 @@ class LiveProcessingManager:
                 cls._instance = cls()
             return cls._instance
 
-    def start(self, scene_record: SceneConfigRecord, phase: str = "UNKNOWN") -> dict:
+    def _run_ms(self) -> int:
+        """Milliseconds since this run started, on the same clock as frame timestamps."""
+        return max(0, int(time.monotonic() * 1000) - self._start_monotonic_ms)
+
+    def start(self, scene_record: SceneConfigRecord, signal_config: dict) -> dict:
         camera = DroidCamManager.get_instance()
         if not camera.get_status()["connected"]:
             raise ValueError("Camera chưa có khung hình mới. Hãy kết nối lại trước khi chạy nhận diện.")
-        if phase not in {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_YELLOW", "ALL_RED", "UNKNOWN"}:
-            raise ValueError("Tín hiệu đèn không hợp lệ")
+        signal_config = parse_signal_config(signal_config)
         self.stop()
         self.prepare()
         run_id = "live_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         timeline = SignalTimeline(
-            timeline_id=f"timeline_{run_id}", version=1, video_id="live", mode="live",
-            changes=[SignalChange(at_video_ms=0, phase=phase, source="live")],
+            timeline_id=f"timeline_{run_id}", version=1, video_id="live", mode="live", changes=[],
         )
+        stop_event = threading.Event()
         with self._lock:
             self.run_id = run_id
             self.status = "STARTING"
             self.error = ""
             self.latest_tracks = None
-            self.phase = phase
             self.timeline = timeline
+            self.signal_timer = LiveSignalTimer(timeline, signal_config, now_ms=0)
+            self.signal_warning = ""
+            self.event_count = 0
             self._start_monotonic_ms = int(time.monotonic() * 1000)
             self.last_result_monotonic_ms = 0
-            self._stop = threading.Event()
+            self._stop = stop_event
         self._thread = threading.Thread(
-            target=self._worker, args=(run_id, scene_record, camera, timeline, self._stop), daemon=True,
+            target=self._worker, args=(run_id, scene_record, camera, timeline, stop_event), daemon=True,
         )
+        self._signal_thread = threading.Thread(target=self._signal_worker, args=(stop_event,), daemon=True)
         self._thread.start()
+        self._signal_thread.start()
         return self.get_status()
 
     def stop(self):
         self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
+        for thread in (self._thread, self._signal_thread):
+            if thread and thread.is_alive():
+                thread.join(timeout=2)
         self._thread = None
+        self._signal_thread = None
         with self._lock:
             self.status = "IDLE"
             self.latest_tracks = None
             self.timeline = None
+            self.signal_timer = None
 
-    def set_phase(self, phase: str, source: str = "live"):
-        if phase not in {"A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW", "ALL_YELLOW", "ALL_RED", "UNKNOWN"}:
-            raise ValueError("Tín hiệu đèn không hợp lệ")
+    def is_running(self) -> bool:
         with self._lock:
-            if self.timeline is None or self.status not in {"STARTING", "RUNNING"}:
+            return self.signal_timer is not None and self.status in {"STARTING", "RUNNING"}
+
+    def set_signal(self, signal_config: dict) -> bool:
+        """Change timer durations or switch to a manual phase during a live run."""
+        signal_config = parse_signal_config(signal_config)
+        with self._lock:
+            if self.signal_timer is None or self.status not in {"STARTING", "RUNNING"}:
                 return False
-            if self.phase == phase:
-                return True
-            at_ms = max(0, int(time.monotonic() * 1000) - self._start_monotonic_ms)
-            self.timeline.changes.append(SignalChange(at_video_ms=at_ms, phase=phase, source=source))
-            self.phase = phase
+            self.signal_timer.configure(signal_config, self._run_ms())
             return True
+
+    def _signal_worker(self, stop_event):
+        """Advance the timer and make the Arduino lamps follow it.
+
+        Runs apart from detection so serial I/O never delays YOLO. Serial errors
+        only produce a warning: violations always use the timer's phases.
+        """
+        arduino = ArduinoSignalService.get_instance()
+        sent_phase = None
+        while not stop_event.is_set():
+            with self._lock:
+                if self.signal_timer is None:
+                    break
+                self.signal_timer.advance(self._run_ms())
+                phase = self.signal_timer.phase
+            if not arduino.is_connected():
+                sent_phase = None
+            elif phase != sent_phase:
+                try:
+                    arduino.command(f"MANUAL {phase}")
+                    sent_phase = phase
+                    self.signal_warning = ""
+                except (ConnectionError, OSError) as exc:
+                    self.signal_warning = f"Arduino không theo được timer: {exc}"
+            stop_event.wait(0.05)
 
     def get_status(self):
         with self._lock:
+            timer = self.signal_timer
             return {
                 "run_id": self.run_id, "status": self.status, "error": self.error,
-                "phase": self.phase, "frame": self.latest_tracks,
+                "phase": timer.phase if timer else "UNKNOWN",
+                "signal": timer.state(self._run_ms()) if timer else None,
+                "signal_warning": self.signal_warning,
+                "event_count": self.event_count,
+                "frame": self.latest_tracks,
                 "detector_warning": self._model_error,
                 "model_ready": self._model_ready.is_set(),
                 "model_loaded": isinstance(self._model, tuple),
@@ -177,22 +221,8 @@ class LiveProcessingManager:
             frame_index = 0
             model_reset = False
             segment_index = 0
-            next_signal_poll = 0.0
-            hardware_seen = False
+            was_paused = False
             while not stop_event.is_set():
-                now = time.monotonic()
-                if now >= next_signal_poll:
-                    next_signal_poll = now + 0.25
-                    try:
-                        hardware_state = ArduinoSignalService.get_instance().status()
-                        if hardware_state.get("connected"):
-                            hardware_seen = True
-                            self.set_phase(hardware_state["phase"], source="arduino")
-                        elif hardware_seen:
-                            self.set_phase("UNKNOWN", source="arduino")
-                    except (ConnectionError, OSError, ValueError):
-                        if hardware_seen:
-                            self.set_phase("UNKNOWN", source="arduino")
                 with camera._lock:
                     camera_timestamp = camera.latest_timestamp_ms
                     source_frame = camera.latest_frame.copy() if camera.latest_frame is not None else None
@@ -206,6 +236,18 @@ class LiveProcessingManager:
                     model_reset = False
                     segment_index += 1
                 last_camera_timestamp = camera_timestamp
+                with self._lock:
+                    timer = self.signal_timer
+                    if timer is not None:
+                        timer.advance(self._run_ms())
+                    paused = timer is not None and timer.paused
+                if paused and not was_paused:
+                    # Cả hai vàng: dừng YOLO. Khi chạy lại, xe được nhận từ đầu ở segment mới
+                    # để vị trí cũ trước lúc dừng không tạo ra lần cắt vạch giả.
+                    track_filter.clear()
+                    model_reset = False
+                    segment_index += 1
+                was_paused = paused
                 # Mốc của frame là lúc camera nhận ảnh (trừ đi tuổi của frame), cùng đồng hồ
                 # monotonic với các lần đổi pha đèn; không dùng lúc YOLO xử lý xong.
                 frame_age_ms = max(0, int(time.time() * 1000) - camera_timestamp)
@@ -225,7 +267,7 @@ class LiveProcessingManager:
                 without_track_id = 0
                 rejected_box_count = 0
                 unconfirmed_count = 0
-                if self._model_ready.is_set() and isinstance(self._model, tuple):
+                if not paused and self._model_ready.is_set() and isinstance(self._model, tuple):
                     model, device = self._model
                     rx1, ry1, rx2, ry2 = roi
                     yolo_size = yolo_input_size(rx2 - rx1, ry2 - ry1)
@@ -269,8 +311,10 @@ class LiveProcessingManager:
                                 if box.id is None:
                                     yolo_detections.append(detection)
                                     continue
-                                track_id = int(box.id.item())
-                                state = track_filter.update(track_id, vehicle_type, point)
+                                state = track_filter.update(
+                                    int(box.id.item()), vehicle_type, point, mapped_box, timestamp_ms,
+                                )
+                                track_id = state["track_id"]  # ổn định qua các lần ByteTrack đổi ID
                                 if not state["confirmed"]:
                                     # Track mới chớp tắt: chỉ hiển thị, chưa xét luật.
                                     unconfirmed_count += 1
@@ -313,6 +357,8 @@ class LiveProcessingManager:
                     self.latest_tracks = frame_data
                     self.last_result_monotonic_ms = int(time.monotonic() * 1000)
                     self.status = "RUNNING"
+                    # Ghi mọi lần đổi pha tới thời điểm này trước khi xét luật.
+                    self.signal_timer.advance(self._run_ms())
                     events = engine.process_frame(TrackFrame.from_dict(frame_data))
                 current_boxes = {track["track_id"]: track["bbox_xyxy"] for track in tracks}
                 for event in events:
@@ -324,7 +370,11 @@ class LiveProcessingManager:
                         )
                         event.event_timestamp_ms = timestamp_ms
                     self._save_event(event, source_frame, run_record)
+                    with self._lock:
+                        self.event_count += 1
                 frame_index += 1
+                if paused:
+                    stop_event.wait(0.1)  # chỉ cập nhật ảnh, không cần chạy hết tốc độ
         except Exception as exc:
             with self._lock:
                 if self.run_id == run_id:

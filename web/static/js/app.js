@@ -439,12 +439,14 @@ class Application {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           scene_config_id: this.currentSceneId,
-          phase: this.signalPanel?.currentPhase || "UNKNOWN",
+          signal: this.signalPanel.serverConfig(),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Không khởi động được nhận diện");
       this.currentRuleRunId = data.run_id;
+      this.signalPanel.setServerDriven(true);
+      this.signalPanel.applyServerState(data.signal);
       this.eventsManager.loadEvents(this.currentRuleRunId);
     } catch (e) {
       if (badge) badge.textContent = `Lỗi xử lý: ${e.message}`;
@@ -454,7 +456,7 @@ class Application {
   startLivePolling() {
     this.stopLivePolling();
     let polling = false;
-    let lastEventsFetch = 0;
+    let lastEventCount = null;
     const poll = async () => {
       if (this.currentStep !== 3 || this.selectedSourceType !== "live" || polling) return;
       polling = true;
@@ -471,12 +473,18 @@ class Application {
           return;
         }
         if (data.run_id === this.currentRuleRunId) {
+          this.signalPanel.applyServerState(data.signal);
+          if (data.signal_warning) this.signalPanel.showHardwareStatus(data.signal_warning);
           this.player.setLiveFrame(data.result_age_ms > 5000 ? null : data.frame);
           if (badge && data.status === "RUNNING") {
             const stats = data.frame?.detection_stats || {};
             const tracked = stats.yolo_tracks || 0;
             const detected = stats.yolo_detections || 0;
-            if (data.detector_warning) {
+            if (data.signal?.paused) {
+              badge.textContent = "Tạm dừng nhận diện · cả hai đường vàng";
+            } else if (data.signal?.warming_up) {
+              badge.textContent = `Đang khởi động YOLO… còn ${Math.ceil(data.signal.remaining_ms / 1000)}s`;
+            } else if (data.detector_warning) {
               badge.textContent = "Lỗi YOLO: " + data.detector_warning;
             } else if (!data.model_ready) {
               badge.textContent = "Đang tải mô hình YOLOv8...";
@@ -492,8 +500,9 @@ class Application {
           }
           if (badge && data.status === "FAILED") badge.textContent = `Lỗi xử lý: ${data.error}`;
           if (badge && data.status === "STARTING") badge.textContent = "Đang khởi động nhận diện...";
-          if (data.status === "RUNNING" && Date.now() - lastEventsFetch >= 5000) {
-            lastEventsFetch = Date.now();
+          // Poll runs every second; reload the list only when a new violation was saved.
+          if (data.status === "RUNNING" && data.event_count !== lastEventCount) {
+            lastEventCount = data.event_count;
             this.eventsManager.loadEvents(this.currentRuleRunId);
           }
         }
@@ -504,23 +513,25 @@ class Application {
       }
     };
     poll();
-    this.livePollInterval = setInterval(poll, 1000);
+    this.livePollInterval = setInterval(poll, 500);  // khung xe, đèn và vi phạm mới
   }
 
   stopLivePolling() {
     if (this.livePollInterval) clearInterval(this.livePollInterval);
     this.livePollInterval = null;
     this.player?.setLiveFrame(null);
+    this.signalPanel?.setServerDriven(false);
   }
 
-  onSignalPhaseChanged(phase) {
-    if (this.currentStep !== 3 || this.selectedSourceType !== "live") return;
+  sendSignalConfig(config) {
     fetch("/api/live/phase/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phase }),
-    }).then((response) => {
-      if (!response.ok) console.warn("Máy chủ chưa nhận được pha đèn:", response.status);
+      body: JSON.stringify(config),
+    }).then(async (response) => {
+      const data = await response.json();
+      if (response.ok) this.signalPanel.applyServerState(data);
+      else console.warn("Máy chủ chưa nhận được cấu hình đèn:", data.error || response.status);
     }).catch((e) => console.warn("Không cập nhật được tín hiệu đèn:", e));
   }
 

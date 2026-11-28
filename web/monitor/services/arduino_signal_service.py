@@ -42,6 +42,9 @@ class ArduinoSignalService:
                 cls._instance = cls()
             return cls._instance
 
+    def is_connected(self) -> bool:
+        return self._serial is not None
+
     def _close(self):
         if self._serial is not None:
             try:

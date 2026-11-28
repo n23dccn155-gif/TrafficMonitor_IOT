@@ -49,7 +49,10 @@ class ViolationEventsManager {
       const res = await fetch(url);
       const data = await res.json();
       if (requestId !== this.requestId) return;
+      const previousNewest = this.events[0]?.event_id;
       this.events = data.events || [];
+      // A new violation takes over the card; otherwise keep the one the user picked.
+      if (this.events[0]?.event_id !== previousNewest) this.activeEventId = null;
       if (this.player) {
         this.player.violationEvents = this.events;
       }
@@ -91,9 +94,9 @@ class ViolationEventsManager {
       return;
     }
 
-    // Show the first / most recent event in the Latest Violation card
-    const latest = this.events[0];
-    this.displayViolationInCard(latest);
+    // Show the picked event, or the most recent one, in the Latest Violation card
+    const shown = this.events.find((e) => e.event_id === this.activeEventId) || this.events[0];
+    this.displayViolationInCard(shown);
 
     // Populate the scrollable history list
     if (this.historyList) {

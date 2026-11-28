@@ -25,6 +25,10 @@ class SignalPanel {
     this.hardwareEnabled = false;
     this.hardwarePoll = null;
     this.hardwareBusy = false;
+    // Live detection: the server timer owns the phases; this panel only shows them.
+    this.serverDriven = false;
+    this.warmingUp = false;  // server keeps both yellow 2s while YOLO restarts
+    this.phaseBeforeAllYellow = "A_GREEN";
 
     // DOM Elements
     this.tabTimed = document.getElementById("tabTimed");
@@ -55,14 +59,18 @@ class SignalPanel {
   setMode(mode) {
     this.mode = mode;
     const container = document.getElementById("trafficLightsContainer");
-    const allRedButton = document.getElementById("manualAllRedButton");
-    if (allRedButton) allRedButton.style.display = mode === "manual" ? "inline-flex" : "none";
+    const allYellowButton = document.getElementById("manualAllYellowButton");
+    if (allYellowButton) allYellowButton.style.display = mode === "manual" ? "inline-flex" : "none";
     if (mode === "timed") {
       this.tabTimed.classList.add("active");
       this.tabManual.classList.remove("active");
       this.timedInputsBox.style.display = "flex";
       this.manualHintText.style.display = "none";
       if (container) container.classList.remove("mode-manual");
+      if (this.serverDriven) {
+        this._sendServerConfig();
+        return;
+      }
       this.startTimedCycle();
       if (this.hardwareEnabled) this.sendHardwareAuto().catch((e) => this.showHardwareStatus(`Lỗi Arduino: ${e.message}`));
     } else {
@@ -73,7 +81,8 @@ class SignalPanel {
       if (container) container.classList.add("mode-manual");
       this.stopTimedCycle();
       this._clearAllCounts();
-      if (this.hardwareEnabled) {
+      if (this.serverDriven) this._sendServerConfig();
+      else if (this.hardwareEnabled) {
         this.hardwareRequest({ action: "manual", phase: this.currentPhase }).catch((e) => this.showHardwareStatus(`Lỗi Arduino: ${e.message}`));
       }
     }
@@ -90,6 +99,10 @@ class SignalPanel {
     this.bGreenSec = Math.min(120, Math.max(3, bg));
     this.bYellowSec = Math.min(10, Math.max(1, by));
 
+    if (this.serverDriven) {
+      if (this.mode === "timed") this._sendServerConfig();
+      return;
+    }
     if (this.hardwareEnabled) {
       this.stopTimedCycle();
       if (this.mode === "timed") this.sendHardwareAuto().catch((e) => this.showHardwareStatus(`Lỗi Arduino: ${e.message}`));
@@ -132,7 +145,7 @@ class SignalPanel {
 
   startTimedCycle() {
     this.stopTimedCycle();
-    if (this.hardwareEnabled) return;
+    if (this.hardwareEnabled || this.serverDriven) return;
     this.cycleTimer = setInterval(() => {
       this.remainingSec--;
       if (this.remainingSec <= 0) {
@@ -168,7 +181,44 @@ class SignalPanel {
     }
   }
 
+  // Both-yellow button: pause (live detection stops) or resume the phase shown before.
+  toggleAllYellow() {
+    if (this.warmingUp) return;
+    if (this.currentPhase === "ALL_YELLOW") {
+      this.setPhase(this.phaseBeforeAllYellow);
+      return;
+    }
+    if (["A_GREEN", "A_YELLOW", "B_GREEN", "B_YELLOW"].includes(this.currentPhase)) {
+      this.phaseBeforeAllYellow = this.currentPhase;
+    }
+    this.setPhase("ALL_YELLOW");
+  }
+
+  _renderAllYellowButton() {
+    const button = document.getElementById("manualAllYellowButton");
+    if (!button) return;
+    const paused = this.currentPhase === "ALL_YELLOW";
+    button.disabled = this.warmingUp;
+    button.setAttribute("aria-pressed", String(paused));
+    if (this.warmingUp) {
+      button.textContent = `⏳ Đang khởi động YOLO… ${this.remainingSec}s`;
+    } else if (this.serverDriven) {
+      button.textContent = paused ? "▶ Tiếp tục nhận diện" : "⏸ Cả hai vàng · dừng nhận diện";
+    } else {
+      button.textContent = paused ? "Bỏ cả hai vàng" : "Cả hai vàng";
+    }
+  }
+
   setPhase(phase, durationSec = null) {
+    if (this.serverDriven) {
+      if (this.mode === "manual") {
+        // Show the click at once so fast clicks chain (A yellow then B yellow = ALL_YELLOW).
+        this.currentPhase = phase;
+        this._renderBulbs();
+        this._sendServerConfig();
+      }
+      return;
+    }
     if (this.hardwareEnabled) {
       if (this.mode === "manual") {
         // Update locally right away so fast clicks chain (e.g. A yellow then B yellow
@@ -180,7 +230,6 @@ class SignalPanel {
       return;
     }
     this.currentPhase = phase;
-    if (typeof app !== "undefined" && app) app.onSignalPhaseChanged(phase);
     if (durationSec !== null) {
       this.remainingSec = durationSec;
     }
@@ -242,7 +291,7 @@ class SignalPanel {
         }
         if (this.bulbBRed) {
           this.bulbBRed.classList.add("active");
-          if (this.countBRed) this.countBRed.textContent = isTimed ? String(this.remainingSec + this.aYellowSec + (this.hardwareEnabled ? 1 : 0)) : "";
+          if (this.countBRed) this.countBRed.textContent = isTimed ? String(this.remainingSec + this.aYellowSec + (this.hardwareEnabled && !this.serverDriven ? 1 : 0)) : "";
         }
         break;
 
@@ -253,7 +302,7 @@ class SignalPanel {
         }
         if (this.bulbBRed) {
           this.bulbBRed.classList.add("active");
-          if (this.countBRed) this.countBRed.textContent = isTimed && this.hardwareEnabled ? String(this.remainingSec + 1) : secStr;
+          if (this.countBRed) this.countBRed.textContent = isTimed && this.hardwareEnabled && !this.serverDriven ? String(this.remainingSec + 1) : secStr;
         }
         break;
 
@@ -264,7 +313,7 @@ class SignalPanel {
         }
         if (this.bulbARed) {
           this.bulbARed.classList.add("active");
-          if (this.countARed) this.countARed.textContent = isTimed ? String(this.remainingSec + this.bYellowSec + (this.hardwareEnabled ? 1 : 0)) : "";
+          if (this.countARed) this.countARed.textContent = isTimed ? String(this.remainingSec + this.bYellowSec + (this.hardwareEnabled && !this.serverDriven ? 1 : 0)) : "";
         }
         break;
 
@@ -275,7 +324,7 @@ class SignalPanel {
         }
         if (this.bulbARed) {
           this.bulbARed.classList.add("active");
-          if (this.countARed) this.countARed.textContent = isTimed && this.hardwareEnabled ? String(this.remainingSec + 1) : secStr;
+          if (this.countARed) this.countARed.textContent = isTimed && this.hardwareEnabled && !this.serverDriven ? String(this.remainingSec + 1) : secStr;
         }
         break;
       case "ALL_YELLOW":
@@ -297,6 +346,7 @@ class SignalPanel {
         break;
     }
 
+    this._renderAllYellowButton();
     if (this.phaseBadge) {
       this.phaseBadge.textContent = this.currentPhase;
       this.phaseBadge.className = "violation-badge " + (
@@ -307,7 +357,40 @@ class SignalPanel {
     }
   }
 
+  serverConfig() {
+    if (this.mode === "manual") {
+      // ALL_RED is not a manual choice; an unknown phase falls back to the pause.
+      const phase = ["UNKNOWN", "ALL_RED"].includes(this.currentPhase) ? "ALL_YELLOW" : this.currentPhase;
+      return { mode: "manual", phase };
+    }
+    return {
+      mode: "timed", a_green: this.aGreenSec, a_yellow: this.aYellowSec,
+      b_green: this.bGreenSec, b_yellow: this.bYellowSec,
+    };
+  }
+
+  setServerDriven(on) {
+    this.serverDriven = on;
+    if (on) this.stopTimedCycle();
+    else this.warmingUp = false;
+    this._renderAllYellowButton();
+  }
+
+  _sendServerConfig() {
+    if (typeof app !== "undefined" && app) app.sendSignalConfig(this.serverConfig());
+  }
+
+  applyServerState(signal) {
+    if (!signal) return;
+    this.currentPhase = signal.phase;
+    this.warmingUp = Boolean(signal.warming_up);
+    this.remainingSec = Math.ceil(signal.remaining_ms / 1000);
+    this._renderBulbs();
+  }
+
   async hardwareRequest(payload) {
+    // While live detection runs, the server sends the lamp phases to the Uno itself.
+    if (this.serverDriven && (payload.action === "auto" || payload.action === "manual")) return {};
     const response = await fetch("/api/arduino/signal/", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -408,6 +491,10 @@ class SignalPanel {
   }
 
   applyHardwareState(state) {
+    if (this.serverDriven) {
+      this.showHardwareStatus(`${state.port}: theo timer nhận diện`);
+      return;
+    }
     this.aGreenSec = state.a_green;
     this.aYellowSec = state.a_yellow;
     this.bGreenSec = state.b_green;
@@ -419,17 +506,15 @@ class SignalPanel {
       this.tabManual.classList[reportedMode === "manual" ? "add" : "remove"]("active");
       this.timedInputsBox.style.display = reportedMode === "timed" ? "flex" : "none";
       this.manualHintText.style.display = reportedMode === "manual" ? "block" : "none";
-      const allRedButton = document.getElementById("manualAllRedButton");
-      if (allRedButton) allRedButton.style.display = reportedMode === "manual" ? "inline-flex" : "none";
+      const allYellowButton = document.getElementById("manualAllYellowButton");
+      if (allYellowButton) allYellowButton.style.display = reportedMode === "manual" ? "inline-flex" : "none";
       const container = document.getElementById("trafficLightsContainer");
       if (container) container.classList[reportedMode === "manual" ? "add" : "remove"]("mode-manual");
     }
-    const previous = this.currentPhase;
     this.currentPhase = state.phase;
     this.remainingSec = Math.ceil(state.remaining_ms / 1000);
     this.showHardwareStatus(`${state.port}: ${state.mode === "auto" ? "Tự động" : "Thủ công"}`);
     this._renderBulbs();
-    if (previous !== state.phase && typeof app !== "undefined" && app) app.onSignalPhaseChanged(state.phase);
   }
 
   async saveTimelineToBackend() {

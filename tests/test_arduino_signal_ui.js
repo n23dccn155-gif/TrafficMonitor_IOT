@@ -10,7 +10,7 @@ global.document = { getElementById(id) {
     elements.set(id, {
       value: id === "arduinoPort" ? "COM3" : id.endsWith("GreenSec") ? "15" : "3",
       textContent: "", style: {}, classes,
-      classList: { add(name) { classes.add(name); }, remove(name) { classes.delete(name); } },
+      classList: { add(name) { classes.add(name); }, remove(name) { classes.delete(name); } }, setAttribute() {},
     });
   }
   return elements.get(id);

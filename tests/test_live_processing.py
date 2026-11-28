@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -8,9 +9,11 @@ import numpy as np
 from django.test import override_settings
 
 from monitor.models import RuleRunRecord, SceneConfigRecord, ViolationEventRecord
+from monitor.services.arduino_signal_service import ArduinoSignalService
 from monitor.services.droidcam_service import DroidCamManager
+from monitor.services.live_signal_timer import LiveSignalTimer
 from monitor.services.live_processing_service import LiveProcessingManager, is_usable_vehicle_box
-from src.traffic_monitor.traffic_rules.schemas import SignalChange, SignalTimeline
+from src.traffic_monitor.traffic_rules.schemas import SignalTimeline
 
 
 def test_camera_reuses_live_reader_and_rejects_stale_frame():
@@ -75,21 +78,20 @@ def test_full_frame_car_detection_is_not_used_for_violations():
     assert is_usable_vehicle_box([100, 100, 180, 150], 640, 480) is True
 
 
-def test_live_phase_uses_change_time_not_last_processed_frame():
+def test_live_manual_phase_uses_change_time_not_last_processed_frame():
     manager = LiveProcessingManager()
     manager.status = "RUNNING"
     manager._start_monotonic_ms = int(time.monotonic() * 1000) - 5000
     manager.latest_tracks = {"video_timestamp_ms": 100}
-    manager.timeline = SignalTimeline(
-        timeline_id="live_test", version=1, video_id="live", mode="live",
-        changes=[SignalChange(at_video_ms=0, phase="A_GREEN")],
-    )
-    manager.set_phase("B_GREEN")
+    manager.timeline = SignalTimeline(timeline_id="live_test", version=1, video_id="live", mode="live", changes=[])
+    manager.signal_timer = LiveSignalTimer(manager.timeline, {"mode": "manual", "phase": "A_GREEN"})
+    assert manager.set_signal({"mode": "manual", "phase": "B_GREEN"}) is True
+    assert manager.timeline.changes[-1].phase == "B_GREEN"
     assert manager.timeline.changes[-1].at_video_ms >= 4900
-    manager.set_phase("ALL_YELLOW", source="arduino")
+    manager.set_signal({"mode": "manual", "phase": "ALL_YELLOW"})
     assert manager.timeline.changes[-1].phase == "ALL_YELLOW"
-    manager.set_phase("UNKNOWN", source="arduino")
-    assert manager.timeline.changes[-1].phase == "UNKNOWN"
+    with pytest.raises(ValueError):
+        manager.set_signal({"mode": "manual", "phase": "UNKNOWN"})
 
 
 @pytest.mark.django_db
@@ -105,7 +107,7 @@ def test_live_start_is_accepted_without_waiting_for_model(client):
         with patch.object(LiveProcessingManager, "_worker") as worker, patch.object(LiveProcessingManager, "prepare"):
             response = client.post(
                 "/api/live/processing/",
-                data=json.dumps({"scene_config_id": scene.scene_id, "phase": "A_GREEN"}),
+                data=json.dumps({"scene_config_id": scene.scene_id, "signal": {"mode": "manual", "phase": "A_GREEN"}}),
                 content_type="application/json",
             )
             assert response.status_code == 202
@@ -115,7 +117,7 @@ def test_live_start_is_accepted_without_waiting_for_model(client):
             status = client.get("/api/live/processing/").json()
             assert status["phase"] == "A_GREEN"
             phase = client.post(
-                "/api/live/phase/", data=json.dumps({"phase": "B_GREEN"}),
+                "/api/live/phase/", data=json.dumps({"mode": "manual", "phase": "B_GREEN"}),
                 content_type="application/json",
             )
             assert phase.status_code == 200
@@ -173,7 +175,7 @@ def test_live_worker_processes_shared_camera_frames(client):
         with patch.object(manager, "prepare"):
             response = client.post(
                 "/api/live/processing/",
-                data=json.dumps({"scene_config_id": scene.scene_id, "phase": "A_GREEN"}),
+                data=json.dumps({"scene_config_id": scene.scene_id, "signal": {"mode": "manual", "phase": "A_GREEN"}}),
                 content_type="application/json",
             )
             assert response.status_code == 202
@@ -216,7 +218,7 @@ def test_live_reports_yolo_unavailable_without_motion_fallback():
         manager._model_error = "YOLO unavailable in test"
         manager._model_ready.set()
         with patch.object(manager, "prepare"):
-            run_id = manager.start(scene, "A_GREEN")["run_id"]
+            run_id = manager.start(scene, {"mode": "manual", "phase": "A_GREEN"})["run_id"]
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
                 status = manager.get_status()
@@ -268,7 +270,7 @@ def test_live_untracked_yolo_detection_is_displayed_but_not_scored():
         manager._model = (fake_model, "cpu")
         manager._model_ready.set()
         with patch.object(manager, "prepare"):
-            run_id = manager.start(scene, "A_GREEN")["run_id"]
+            run_id = manager.start(scene, {"mode": "manual", "phase": "A_GREEN"})["run_id"]
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
                 status = manager.get_status()
@@ -347,8 +349,9 @@ def test_live_vehicle_crossing_red_line_saves_current_frame_evidence(tmp_path):
         manager._model = (fake_model, "cpu")
         manager._model_error = None
         manager._model_ready.set()
-        with patch.object(manager, "prepare"), override_settings(MEDIA_ROOT=tmp_path):
-            run_id = manager.start(scene, phase="B_GREEN")["run_id"]
+        # Lỗi được tính theo timer: worker không được hỏi pha từ Arduino.
+        with patch.object(manager, "prepare"), override_settings(MEDIA_ROOT=tmp_path),                 patch.object(ArduinoSignalService, "status", side_effect=AssertionError("Arduino polled")):
+            run_id = manager.start(scene, {"mode": "manual", "phase": "B_GREEN"})["run_id"]
             deadline = time.monotonic() + 4
             event = None
             while time.monotonic() < deadline:
@@ -366,6 +369,7 @@ def test_live_vehicle_crossing_red_line_saves_current_frame_evidence(tmp_path):
             assert (tmp_path / "evidence" / f"{event.event_id}_full.jpg").is_file()
             assert (tmp_path / "evidence" / f"{event.event_id}_crop.jpg").is_file()
             assert fake_model.calls >= 4
+            assert manager.get_status()["event_count"] == 1
     finally:
         manager.stop()
         camera.stop()
@@ -373,3 +377,106 @@ def test_live_vehicle_crossing_red_line_saves_current_frame_evidence(tmp_path):
         manager._model_error = previous_error
         if not previous_ready:
             manager._model_ready.clear()
+
+
+def test_signal_worker_makes_arduino_follow_timer():
+    class FakeArduino:
+        def __init__(self):
+            self.commands = []
+
+        def is_connected(self):
+            return True
+
+        def command(self, text):
+            self.commands.append(text)
+            if len(self.commands) == 2:
+                raise ConnectionError("USB unplugged")
+
+    manager = LiveProcessingManager()
+    manager.status = "RUNNING"
+    manager._start_monotonic_ms = int(time.monotonic() * 1000)
+    manager.timeline = SignalTimeline(timeline_id="t", version=1, video_id="live", mode="live", changes=[])
+    manager.signal_timer = LiveSignalTimer(manager.timeline, {"mode": "manual", "phase": "A_GREEN"})
+    arduino = FakeArduino()
+    with patch.object(ArduinoSignalService, "get_instance", return_value=arduino):
+        thread = threading.Thread(target=manager._signal_worker, args=(manager._stop,), daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 2
+            while not arduino.commands and time.monotonic() < deadline:
+                time.sleep(0.01)
+            manager.set_signal({"mode": "manual", "phase": "ALL_YELLOW"})
+            while len(arduino.commands) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            manager._stop.set()
+            thread.join(timeout=1)
+    # A failed send is retried; the rule phase never depends on the Arduino.
+    assert arduino.commands[:3] == ["MANUAL A_GREEN", "MANUAL ALL_YELLOW", "MANUAL ALL_YELLOW"]
+    assert manager.signal_timer.phase == "ALL_YELLOW"
+    assert manager.signal_warning == ""
+
+
+@pytest.mark.django_db
+def test_live_signal_apis_validate_and_block_arduino_override(client):
+    manager = LiveProcessingManager.get_instance()
+    bad = client.post("/api/live/phase/", data=json.dumps({"mode": "timed", "a_green": 999}),
+                      content_type="application/json")
+    assert bad.status_code == 400
+    with patch.object(LiveProcessingManager, "is_running", return_value=True):
+        blocked = client.post("/api/arduino/signal/", data=json.dumps({"action": "manual", "phase": "A_GREEN"}),
+                              content_type="application/json")
+    assert blocked.status_code == 409
+    assert manager.set_signal({"mode": "manual", "phase": "A_GREEN"}) is False  # not running
+
+
+@pytest.mark.django_db(transaction=True)
+def test_both_yellow_stops_yolo_and_resume_runs_it_during_warm_up():
+    class CountingModel:
+        predictor = None
+        calls = 0
+
+        def track(self, *args, **kwargs):
+            self.calls += 1
+            return [SimpleNamespace(boxes=None, names={})]
+
+    scene = SceneConfigRecord.objects.create(
+        scene_id="scene_live_pause", source_id="live", version=1,
+        data_json={"scene_id": "scene_live_pause", "source_id": "live", "reference_size": [640, 480], "roads": {}},
+    )
+    camera = DroidCamManager.get_instance()
+    manager = LiveProcessingManager.get_instance()
+    camera.connect("mock://droidcam")
+    manager.stop()
+    previous = (manager._model, manager._model_error, manager._model_ready.is_set())
+    model = CountingModel()
+    try:
+        manager._model = (model, "cpu")
+        manager._model_error = ""
+        manager._model_ready.set()
+        with patch.object(manager, "prepare"):
+            manager.start(scene, {"mode": "manual", "phase": "ALL_YELLOW"})
+            deadline = time.monotonic() + 3
+            while manager.get_status()["status"] != "RUNNING" and time.monotonic() < deadline:
+                time.sleep(0.02)
+            time.sleep(0.3)
+            assert manager.get_status()["signal"]["paused"] is True
+            assert model.calls == 0
+            manager.set_signal({"mode": "manual", "phase": "B_GREEN"})
+            while model.calls == 0 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            status = manager.get_status()
+            assert model.calls > 0  # YOLO restarts while the lights are still yellow
+            assert status["signal"]["phase"] == "ALL_YELLOW" and status["signal"]["warming_up"] is True
+    finally:
+        manager.stop()
+        camera.stop()
+        manager._model, manager._model_error = previous[0], previous[1]
+        if not previous[2]:
+            manager._model_ready.clear()
+
+
+def test_arduino_api_rejects_manual_both_red(client):
+    response = client.post("/api/arduino/signal/", data=json.dumps({"action": "manual", "phase": "ALL_RED"}),
+                           content_type="application/json")
+    assert response.status_code == 400

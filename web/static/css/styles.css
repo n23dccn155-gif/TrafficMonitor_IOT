@@ -378,6 +378,11 @@ button {
   border-color: var(--border-color);
   color: var(--text-body);
 }
+.btn-outline:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .btn-outline:hover {
   background: var(--bg-muted);
   border-color: #cbd5e1;

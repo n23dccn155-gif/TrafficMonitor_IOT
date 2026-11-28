@@ -26,7 +26,8 @@ from .models import (
     ViolationEventRecord,
 )
 from .services.droidcam_service import DroidCamManager
-from .services.arduino_signal_service import ArduinoSignalService, PHASES
+from .services.arduino_signal_service import ArduinoSignalService
+from .services.live_signal_timer import MANUAL_PHASES
 from .services.evidence_service import create_violation_evidence
 from .services.job_service import JobManager
 from .services.live_processing_service import LiveProcessingManager
@@ -39,9 +40,16 @@ from .services.video_service import (
 )
 
 
+def _static_version() -> str:
+    """Newest mtime of the dashboard JS/CSS, so browsers fetch them again after an update."""
+    static_dir = settings.BASE_DIR / "web" / "static"
+    files = [*static_dir.glob("js/*.js"), *static_dir.glob("css/*.css")]
+    return str(int(max((f.stat().st_mtime for f in files), default=0)))
+
+
 def index_view(request):
     """Main surveillance monitoring dashboard."""
-    return render(request, "dashboard.html")
+    return render(request, "dashboard.html", {"static_version": _static_version()})
 
 
 # --- VIDEO APIS ---
@@ -230,6 +238,9 @@ def arduino_signal_api(request):
             if not isinstance(data, dict):
                 raise ValueError("JSON object required")
             action = data.get("action")
+            if action in {"auto", "manual"} and LiveProcessingManager.get_instance().is_running():
+                # Đang nhận diện live: đèn do timer server điều khiển, gửi lên /api/live/phase/.
+                return JsonResponse({"error": "Đèn đang chạy theo timer nhận diện"}, status=409)
             if action == "connect":
                 result = service.connect(data.get("port"))
             elif action == "disconnect":
@@ -247,22 +258,17 @@ def arduino_signal_api(request):
                 result = service.command("AUTO " + " ".join(map(str, values)))
             elif action == "manual":
                 phase = data.get("phase")
-                if phase not in PHASES:
+                if phase not in MANUAL_PHASES:
                     raise ValueError("Invalid phase")
                 result = service.command(f"MANUAL {phase}")
             else:
                 raise ValueError("Invalid action")
         else:
             return JsonResponse({"error": "GET or POST required"}, status=405)
-        if result.get("connected") and result.get("phase"):
-            LiveProcessingManager.get_instance().set_phase(result["phase"], source="arduino")
-        elif request.method == "POST" and data.get("action") == "disconnect":
-            LiveProcessingManager.get_instance().set_phase("UNKNOWN")
         return JsonResponse(result)
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         return JsonResponse({"error": str(exc)}, status=400)
     except (ConnectionError, OSError, ImportError) as exc:
-        LiveProcessingManager.get_instance().set_phase("UNKNOWN")
         return JsonResponse({"error": str(exc), "connected": False}, status=503)
 
 
@@ -482,14 +488,9 @@ def live_processing_api(request):
         scene = SceneConfigRecord.objects.filter(scene_id=scene_id, source_id="live").order_by("-version").first()
         if not scene:
             return JsonResponse({"error": "Không tìm thấy quy ước camera đã lưu"}, status=404)
-        hardware = ArduinoSignalService.get_instance().status()
-        phase = hardware["phase"] if hardware.get("connected") else data.get("phase", "UNKNOWN")
-        return JsonResponse(manager.start(scene, phase), status=202)
-    except (ValueError, TypeError) as exc:
+        return JsonResponse(manager.start(scene, data.get("signal")), status=202)
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
         return JsonResponse({"error": str(exc)}, status=400)
-    except (ConnectionError, OSError) as exc:
-        manager.set_phase("UNKNOWN")
-        return JsonResponse({"error": str(exc)}, status=503)
 
 
 @csrf_exempt
@@ -497,15 +498,9 @@ def live_phase_api(request):
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
     try:
-        phase = json.loads(request.body)["phase"]
-        hardware = ArduinoSignalService.get_instance().status()
-        if hardware.get("connected"):
-            phase = hardware["phase"]
-        if not LiveProcessingManager.get_instance().set_phase(phase, source="arduino" if hardware.get("connected") else "live"):
+        manager = LiveProcessingManager.get_instance()
+        if not manager.set_signal(json.loads(request.body)):
             return JsonResponse({"error": "Nhận diện trực tiếp chưa hoạt động"}, status=409)
-        return JsonResponse({"status": "ok"})
-    except (ValueError, KeyError, TypeError) as exc:
+        return JsonResponse(manager.get_status()["signal"])
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
         return JsonResponse({"error": str(exc)}, status=400)
-    except (ConnectionError, OSError) as exc:
-        LiveProcessingManager.get_instance().set_phase("UNKNOWN")
-        return JsonResponse({"error": str(exc)}, status=503)

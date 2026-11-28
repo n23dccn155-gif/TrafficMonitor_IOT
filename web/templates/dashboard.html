@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TrafficMonitor IoT - Hệ Thống Giám Sát Giao Thông</title>
-  <link rel="stylesheet" href="/static/css/styles.css">
+  <link rel="stylesheet" href="/static/css/styles.css?v={{ static_version }}">
 </head>
 <body>
 
@@ -225,10 +225,10 @@
 
         <!-- Manual Hint -->
         <div id="manualHintText" style="display:none; font-size:0.72rem; color:var(--text-muted); text-align:center; margin-bottom:0.4rem;">
-          👉 Bấm trực tiếp vào bóng đèn màu để chuyển pha (Bên này Xanh thì bên kia tự chuyển Đỏ). Bấm vàng ở cả ĐƯỜNG A và ĐƯỜNG B để bật pha cả hai cùng vàng.
+          👉 Bấm trực tiếp vào bóng đèn màu để chuyển pha (Bên này Xanh thì bên kia tự chuyển Đỏ). Bấm nút bên dưới (hoặc bấm vàng ở cả hai đường) để cả hai cùng vàng: camera trực tiếp sẽ tạm dừng nhận diện.
         </div>
 
-        <button id="manualAllRedButton" class="btn-outline" type="button" onclick="signalPanel.setPhase('ALL_RED')" style="display:none; margin:5px auto;" title="Bật cả hai đèn đỏ">Cả hai đỏ</button>
+        <button id="manualAllYellowButton" class="btn-outline" type="button" onclick="signalPanel.toggleAllYellow()" style="display:none; margin:5px auto;" aria-pressed="false">Cả hai vàng</button>
 
         <!-- The Two Traffic Light Units Side-by-Side -->
         <div id="trafficLightsContainer" class="traffic-lights-row">
@@ -336,12 +336,12 @@
   </div>
 
   <!-- Scripts -->
-  <script src="/static/js/player.js"></script>
-  <script src="/static/js/signal.js"></script>
-  <script src="/static/js/scene-geometry.js"></script>
-  <script src="/static/js/editor.js"></script>
-  <script src="/static/js/events.js"></script>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/player.js?v={{ static_version }}"></script>
+  <script src="/static/js/signal.js?v={{ static_version }}"></script>
+  <script src="/static/js/scene-geometry.js?v={{ static_version }}"></script>
+  <script src="/static/js/editor.js?v={{ static_version }}"></script>
+  <script src="/static/js/events.js?v={{ static_version }}"></script>
+  <script src="/static/js/app.js?v={{ static_version }}"></script>
 
   <script>
     function highlightToolBtn(btn) {
